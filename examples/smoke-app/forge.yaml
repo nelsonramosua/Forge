@@ -1,0 +1,16 @@
+name: myapp
+runtime: python3.11
+build:
+  commands:
+    - python3 -m py_compile app.py
+run:
+  command: python3 app.py
+  port: 8000
+resources:
+  memory: 128M
+  cpu: 0.2
+health:
+  path: /health
+  interval: 2s
+  timeout: 2s
+  retries: 10

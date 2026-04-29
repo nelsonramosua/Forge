@@ -1,0 +1,9 @@
+{
+	admin 127.0.0.1:2019
+	email admin@{{ forge_base_domain }}
+}
+
+{{ forge_base_domain }} {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080
+}

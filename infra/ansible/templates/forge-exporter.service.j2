@@ -1,0 +1,16 @@
+[Unit]
+Description=Forge Prometheus exporter
+After=forge-agent.service
+Requires=forge-agent.service
+
+[Service]
+User=forge
+Group=forge
+Environment=FORGE_AGENT_METRICS_SOCKET=/run/forge-agent/metrics.sock
+Environment=FORGE_EXPORTER_ADDR=:9108
+ExecStart=/usr/local/bin/forge-exporter
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

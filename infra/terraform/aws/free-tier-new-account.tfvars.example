@@ -1,0 +1,6 @@
+# AWS accounts created on or after July 15, 2025 can have broader EC2 Free Tier
+# eligible instance types, depending on active account terms and credits.
+# Verify in the AWS Billing Free Tier page before using this profile.
+
+control_plane_instance_type = "t3.small"
+worker_instance_type        = "t4g.small"

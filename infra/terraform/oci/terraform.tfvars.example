@@ -1,0 +1,31 @@
+compartment_ocid    = "ocid1.compartment.oc1..example"
+region              = "eu-madrid-1"
+base_domain         = "forge.example.com"
+ssh_public_key_path = "/home/YOUR_USER/.ssh/forge_oci.pub"
+admin_cidr          = "203.0.113.10/32"
+
+# Optional: leave empty to use the first availability domain returned by OCI.
+availability_domain = ""
+
+# Free-tier friendly defaults:
+# - no NAT gateway, because many Free Tier accounts hit NAT service limits
+# - worker gets a public IP for outbound apt/git, while inbound remains locked by security lists
+# - DNS management is off unless you have OCI DNS zone quota
+create_nat_gateway      = false
+worker_assign_public_ip = true
+create_dns_zone         = false
+manage_dns_records      = false
+existing_dns_zone_id    = ""
+
+# Capacity knobs. If A1 capacity is unavailable, try a different availability_domain
+# first. As a fallback for the control plane only, you can try VM.Standard.E2.1.Micro
+# with control_plane_use_flex_shape_config=false.
+control_plane_shape                 = "VM.Standard.A1.Flex"
+control_plane_use_flex_shape_config = true
+control_plane_ocpus                 = 1
+control_plane_memory_gbs            = 6
+
+worker_shape                 = "VM.Standard.A1.Flex"
+worker_use_flex_shape_config = true
+worker_ocpus                 = 3
+worker_memory_gbs            = 18

@@ -1,0 +1,15 @@
+# Use this with:
+# terraform -chdir=infra/terraform/oci apply -var-file=terraform.tfvars -var-file=capacity-a1-min.tfvars.example
+#
+# Keeps both VMs on Always Free Ampere A1 but asks for less capacity.
+# This is still subject to A1 host availability in your region.
+
+control_plane_shape                 = "VM.Standard.A1.Flex"
+control_plane_use_flex_shape_config = true
+control_plane_ocpus                 = 1
+control_plane_memory_gbs            = 6
+
+worker_shape                 = "VM.Standard.A1.Flex"
+worker_use_flex_shape_config = true
+worker_ocpus                 = 1
+worker_memory_gbs            = 6

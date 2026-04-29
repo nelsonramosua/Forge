@@ -1,0 +1,20 @@
+groups:
+  - name: forge-platform
+    rules:
+      - alert: ForgeNoOnlineAgents
+        expr: forge_agents_online == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: No Forge worker agents are online.
+          description: The control plane cannot schedule pending deployments while all agents are offline.
+
+      - alert: ForgeDeploymentFailures
+        expr: increase(forge_deployments_total{status="failed"}[10m]) > 0
+        for: 1m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Forge deployments are failing.
+          description: At least one deployment entered failed state in the last ten minutes.

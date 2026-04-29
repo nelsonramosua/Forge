@@ -1,0 +1,23 @@
+[Unit]
+Description=Forge control plane
+After=network-online.target caddy.service
+Wants=network-online.target
+
+[Service]
+User=forge
+Group=forge
+Environment=FORGE_ADDR=:8080
+Environment=FORGE_DB_PATH=/var/lib/forge/forge.db
+Environment=FORGE_WORK_DIR=/var/lib/forge/work
+Environment=FORGE_BASE_DOMAIN={{ forge_base_domain }}
+Environment=FORGE_CADDY_ADMIN_URL=http://127.0.0.1:2019
+EnvironmentFile=-/etc/forge/control-plane.env
+ExecStart=/usr/local/bin/forge-control-plane
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/forge
+
+[Install]
+WantedBy=multi-user.target

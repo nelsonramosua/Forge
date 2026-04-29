@@ -1,0 +1,422 @@
+- name: Configure Forge control plane
+  hosts: control_plane
+  become: true
+  vars:
+    forge_user: forge
+    forge_source_dir: /opt/forge-src
+    forge_base_domain: "{{ hostvars[inventory_hostname].forge_base_domain }}"
+    forge_control_plane_private_ip: "{{ hostvars[inventory_hostname].forge_control_plane_private_ip }}"
+  tasks:
+    - name: Install base packages and observability services
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - debian-archive-keyring
+          - debian-keyring
+          - gcc
+          - git
+          - gnupg
+          - golang-go
+          - make
+          - prometheus
+          - prometheus-alertmanager
+          - python3
+          - python3-pip
+          - python3-venv
+          - rsync
+          - sqlite3
+          - tar
+        state: present
+        update_cache: true
+
+    - name: Create apt keyring directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Install Caddy apt key
+      ansible.builtin.get_url:
+        url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
+        dest: /etc/apt/keyrings/caddy.asc
+        mode: "0644"
+
+    - name: Add Caddy apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/caddy.asc] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main"
+        filename: caddy-stable
+        state: present
+
+    - name: Install Grafana apt key
+      ansible.builtin.get_url:
+        url: https://apt.grafana.com/gpg.key
+        dest: /etc/apt/keyrings/grafana.asc
+        mode: "0644"
+
+    - name: Add Grafana apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/grafana.asc] https://apt.grafana.com stable main"
+        filename: grafana
+        state: present
+
+    - name: Install Caddy and Grafana
+      ansible.builtin.apt:
+        name:
+          - caddy
+          - grafana
+        state: present
+        update_cache: true
+
+    - name: Create forge user
+      ansible.builtin.user:
+        name: "{{ forge_user }}"
+        system: true
+        create_home: true
+        home: /var/lib/forge
+
+    - name: Create control-plane directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner | default(forge_user) }}"
+        group: "{{ item.group | default(forge_user) }}"
+        mode: "{{ item.mode | default('0755') }}"
+      loop:
+        - { path: /var/lib/forge }
+        - { path: /var/lib/forge/work }
+        - { path: /etc/forge, owner: root, group: root, mode: "0750" }
+        - { path: "{{ forge_source_dir }}", owner: root, group: root, mode: "0755" }
+        - { path: /var/lib/grafana/dashboards, owner: grafana, group: grafana, mode: "0755" }
+
+    - name: Build local source archive
+      ansible.builtin.command:
+        cmd: >
+          tar
+          --exclude=.git
+          --exclude=bin
+          --exclude=data
+          --exclude=.terraform
+          --exclude=terraform.tfstate
+          --exclude=terraform.tfstate.backup
+          --exclude=infra/ansible/group_vars/all/vault.yml
+          -czf /tmp/forge-src.tar.gz
+          -C {{ playbook_dir }}/../.. .
+      delegate_to: localhost
+      become: false
+      changed_when: true
+
+    - name: Upload source archive
+      ansible.builtin.copy:
+        src: /tmp/forge-src.tar.gz
+        dest: /tmp/forge-src.tar.gz
+        mode: "0644"
+
+    - name: Unpack Forge source
+      ansible.builtin.unarchive:
+        src: /tmp/forge-src.tar.gz
+        dest: "{{ forge_source_dir }}"
+        remote_src: true
+        owner: root
+        group: root
+
+    - name: Build Forge binaries on ARM64 host
+      ansible.builtin.command:
+        cmd: make clean build
+        chdir: "{{ forge_source_dir }}"
+      changed_when: true
+
+    - name: Install Forge binaries
+      ansible.builtin.command:
+        cmd: make install PREFIX=/usr/local
+        chdir: "{{ forge_source_dir }}"
+      changed_when: true
+      notify: Restart forge-control-plane
+
+    - name: Install control-plane environment file
+      ansible.builtin.template:
+        src: control-plane.env.j2
+        dest: /etc/forge/control-plane.env
+        owner: root
+        group: root
+        mode: "0600"
+      notify: Restart forge-control-plane
+
+    - name: Install control-plane unit
+      ansible.builtin.template:
+        src: forge-control-plane.service.j2
+        dest: /etc/systemd/system/forge-control-plane.service
+        mode: "0644"
+      notify: Restart forge-control-plane
+
+    - name: Install Caddyfile
+      ansible.builtin.template:
+        src: Caddyfile.j2
+        dest: /etc/caddy/Caddyfile
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload caddy
+
+    - name: Install Prometheus config
+      ansible.builtin.template:
+        src: prometheus.yml.j2
+        dest: /etc/prometheus/prometheus.yml
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart prometheus
+
+    - name: Install Prometheus alerts
+      ansible.builtin.copy:
+        src: ../../observability/alerts.yml
+        dest: /etc/prometheus/alerts.yml
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart prometheus
+
+    - name: Install Alertmanager config
+      ansible.builtin.template:
+        src: alertmanager.yml.j2
+        dest: /etc/prometheus/alertmanager.yml
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart alertmanager
+
+    - name: Install Grafana datasource provisioning
+      ansible.builtin.copy:
+        src: ../../observability/grafana/provisioning/datasources/
+        dest: /etc/grafana/provisioning/datasources/
+        owner: root
+        group: grafana
+        mode: "0644"
+      notify: Restart grafana
+
+    - name: Install Grafana dashboard provider
+      ansible.builtin.copy:
+        src: ../../observability/grafana/provisioning/dashboards/forge.yml
+        dest: /etc/grafana/provisioning/dashboards/forge.yml
+        owner: root
+        group: grafana
+        mode: "0644"
+      notify: Restart grafana
+
+    - name: Install Grafana Forge dashboard
+      ansible.builtin.copy:
+        src: ../../observability/grafana/provisioning/dashboards/forge.json
+        dest: /var/lib/grafana/dashboards/forge.json
+        owner: grafana
+        group: grafana
+        mode: "0644"
+      notify: Restart grafana
+
+    - name: Enable and start control-plane services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+      loop:
+        - caddy
+        - forge-control-plane
+        - prometheus
+        - prometheus-alertmanager
+        - grafana-server
+
+    - name: Flush service restarts before Grafana admin reset
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for Grafana API
+      ansible.builtin.uri:
+        url: http://127.0.0.1:3000/api/health
+        method: GET
+        status_code: 200
+      register: grafana_health
+      retries: 30
+      delay: 2
+      until: grafana_health.status == 200
+
+    - name: Set Grafana admin password
+      ansible.builtin.command:
+        cmd: "grafana cli admin reset-admin-password {{ vault_grafana_admin_password }}"
+      no_log: true
+      changed_when: true
+      register: grafana_password_reset
+      failed_when: false
+
+    - name: Set Grafana admin password with legacy CLI
+      ansible.builtin.command:
+        cmd: "grafana-cli admin reset-admin-password {{ vault_grafana_admin_password }}"
+      no_log: true
+      changed_when: true
+      when: grafana_password_reset.rc != 0
+
+  handlers:
+    - name: Restart forge-control-plane
+      ansible.builtin.systemd:
+        name: forge-control-plane
+        state: restarted
+        daemon_reload: true
+
+    - name: Reload caddy
+      ansible.builtin.systemd:
+        name: caddy
+        state: reloaded
+
+    - name: Restart prometheus
+      ansible.builtin.systemd:
+        name: prometheus
+        state: restarted
+
+    - name: Restart alertmanager
+      ansible.builtin.systemd:
+        name: prometheus-alertmanager
+        state: restarted
+
+    - name: Restart grafana
+      ansible.builtin.systemd:
+        name: grafana-server
+        state: restarted
+
+- name: Configure Forge workers
+  hosts: workers
+  become: true
+  vars:
+    forge_user: forge
+    forge_source_dir: /opt/forge-src
+    forge_control_plane_url: "{{ hostvars[inventory_hostname].forge_control_plane_url }}"
+    forge_agent_address: "{{ hostvars[inventory_hostname].forge_agent_address }}"
+  tasks:
+    - name: Install worker packages
+      ansible.builtin.apt:
+        name:
+          - build-essential
+          - ca-certificates
+          - gcc
+          - git
+          - golang-go
+          - make
+          - python3
+          - python3-pip
+          - python3-venv
+          - rsync
+          - sqlite3
+          - tar
+        state: present
+        update_cache: true
+
+    - name: Create forge user
+      ansible.builtin.user:
+        name: "{{ forge_user }}"
+        system: true
+        create_home: true
+        home: /var/lib/forge-agent
+
+    - name: Create worker directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner | default(forge_user) }}"
+        group: "{{ item.group | default(forge_user) }}"
+        mode: "{{ item.mode | default('0755') }}"
+      loop:
+        - { path: /var/lib/forge-agent }
+        - { path: /var/lib/forge-agent/apps }
+        - { path: /etc/forge, owner: root, group: root, mode: "0750" }
+        - { path: "{{ forge_source_dir }}", owner: root, group: root, mode: "0755" }
+
+    - name: Build local source archive
+      ansible.builtin.command:
+        cmd: >
+          tar
+          --exclude=.git
+          --exclude=bin
+          --exclude=data
+          --exclude=.terraform
+          --exclude=terraform.tfstate
+          --exclude=terraform.tfstate.backup
+          --exclude=infra/ansible/group_vars/all/vault.yml
+          -czf /tmp/forge-src.tar.gz
+          -C {{ playbook_dir }}/../.. .
+      delegate_to: localhost
+      become: false
+      changed_when: true
+
+    - name: Upload source archive
+      ansible.builtin.copy:
+        src: /tmp/forge-src.tar.gz
+        dest: /tmp/forge-src.tar.gz
+        mode: "0644"
+
+    - name: Unpack Forge source
+      ansible.builtin.unarchive:
+        src: /tmp/forge-src.tar.gz
+        dest: "{{ forge_source_dir }}"
+        remote_src: true
+        owner: root
+        group: root
+
+    - name: Build Forge binaries on ARM64 host
+      ansible.builtin.command:
+        cmd: make clean build
+        chdir: "{{ forge_source_dir }}"
+      changed_when: true
+
+    - name: Install Forge binaries
+      ansible.builtin.command:
+        cmd: make install PREFIX=/usr/local
+        chdir: "{{ forge_source_dir }}"
+      changed_when: true
+      notify:
+        - Restart forge-agent
+        - Restart forge-exporter
+
+    - name: Install agent environment file
+      ansible.builtin.template:
+        src: agent.env.j2
+        dest: /etc/forge/agent.env
+        owner: root
+        group: root
+        mode: "0600"
+      notify: Restart forge-agent
+
+    - name: Install agent unit
+      ansible.builtin.template:
+        src: forge-agent.service.j2
+        dest: /etc/systemd/system/forge-agent.service
+        mode: "0644"
+      notify: Restart forge-agent
+
+    - name: Install exporter unit
+      ansible.builtin.template:
+        src: forge-exporter.service.j2
+        dest: /etc/systemd/system/forge-exporter.service
+        mode: "0644"
+      notify: Restart forge-exporter
+
+    - name: Enable worker services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+      loop:
+        - forge-agent
+        - forge-exporter
+
+  handlers:
+    - name: Restart forge-agent
+      ansible.builtin.systemd:
+        name: forge-agent
+        state: restarted
+        daemon_reload: true
+      notify: Restart forge-exporter
+
+    - name: Restart forge-exporter
+      ansible.builtin.systemd:
+        name: forge-exporter
+        state: restarted
+        daemon_reload: true

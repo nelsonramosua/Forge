@@ -1,0 +1,13 @@
+# Use this with:
+# terraform -chdir=infra/terraform/oci apply -var-file=terraform.tfvars -var-file=capacity-e2-control-a1-worker.tfvars.example
+#
+# Moves only the control plane to the Always Free AMD Micro shape.
+# Keep the worker on A1 so builds still have enough memory/CPU.
+
+control_plane_shape                 = "VM.Standard.E2.1.Micro"
+control_plane_use_flex_shape_config = false
+
+worker_shape                 = "VM.Standard.A1.Flex"
+worker_use_flex_shape_config = true
+worker_ocpus                 = 1
+worker_memory_gbs            = 6

@@ -1,0 +1,22 @@
+[Unit]
+Description=Forge worker agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=root
+Group=forge
+Environment=FORGE_CONTROL_PLANE_URL={{ forge_control_plane_url }}
+Environment=FORGE_RUNNER_PATH=/usr/local/bin/forge-build-runner
+Environment=FORGE_METRICS_SOCKET=/run/forge-agent/metrics.sock
+Environment=FORGE_AGENT_APP_ROOT=/var/lib/forge-agent/apps
+EnvironmentFile=-/etc/forge/agent.env
+ExecStart=/usr/local/bin/forge-agent
+Restart=always
+RestartSec=3
+UMask=0007
+RuntimeDirectory=forge-agent
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

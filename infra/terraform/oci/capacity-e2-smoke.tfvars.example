@@ -1,0 +1,12 @@
+# Use this with:
+# terraform -chdir=infra/terraform/oci apply -var-file=terraform.tfvars -var-file=capacity-e2-smoke.tfvars.example
+#
+# Last-resort smoke-test profile. Two E2 Micro instances are Always Free eligible,
+# but they have only 1 GB RAM each. This can validate networking/SSH/Terraform,
+# but the full Forge + Grafana + Prometheus Ansible playbook may be too heavy.
+
+control_plane_shape                 = "VM.Standard.E2.1.Micro"
+control_plane_use_flex_shape_config = false
+
+worker_shape                 = "VM.Standard.E2.1.Micro"
+worker_use_flex_shape_config = false

@@ -1,0 +1,5 @@
+vault_forge_master_key: "replace-with-32-byte-base64-key"
+vault_forge_agent_token: "replace-with-random-hex-token"
+vault_forge_admin_token: "replace-with-random-hex-token"
+vault_forge_github_webhook_secret: "replace-with-random-hex-secret"
+vault_grafana_admin_password: "replace-with-strong-password"
