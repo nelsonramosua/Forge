@@ -22,7 +22,7 @@ bin/forge-exporter: go.mod cmd/forge-exporter/main.go
 
 bin/forge-agent: agent/src/forge_agent.c
 	mkdir -p bin
-	$(CC) $(CFLAGS) -pthread -o $@ $<
+	$(CC) $(CFLAGS) -pthread -o $@ $< agent/src/json_parser.c
 
 bin/forge-build-runner: build-runner/src/forge_build_runner.c
 	mkdir -p bin

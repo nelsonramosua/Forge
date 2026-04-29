@@ -8,6 +8,7 @@
 
 {{ forge_base_domain }} {
 	encode zstd gzip
+	# /metrics is scraped directly from the control plane on 127.0.0.1:8080.
 	@metrics path /metrics
 	respond @metrics 404
 	@tlsAsk path /api/v1/tls/ask

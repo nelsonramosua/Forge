@@ -89,6 +89,57 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+resource "aws_subnet" "private" {
+  vpc_id            = aws_vpc.forge.id
+  cidr_block        = var.private_subnet_cidr
+  availability_zone = data.aws_availability_zones.available.names[0]
+
+  tags = merge(local.common_tags, {
+    Name = "forge-private-subnet"
+  })
+}
+
+resource "aws_eip" "nat" {
+  count  = var.create_nat_gateway ? 1 : 0
+  domain = "vpc"
+
+  tags = merge(local.common_tags, {
+    Name = "forge-nat-eip"
+  })
+}
+
+resource "aws_nat_gateway" "private" {
+  count         = var.create_nat_gateway ? 1 : 0
+  allocation_id = aws_eip.nat[0].id
+  subnet_id     = aws_subnet.public.id
+
+  tags = merge(local.common_tags, {
+    Name = "forge-nat-gateway"
+  })
+
+  depends_on = [aws_internet_gateway.forge]
+}
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.forge.id
+
+  tags = merge(local.common_tags, {
+    Name = "forge-private-routes"
+  })
+}
+
+resource "aws_route" "private_default" {
+  count                  = var.create_nat_gateway ? 1 : 0
+  route_table_id         = aws_route_table.private.id
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.private[0].id
+}
+
+resource "aws_route_table_association" "private" {
+  subnet_id      = aws_subnet.private.id
+  route_table_id = aws_route_table.private.id
+}
+
 resource "aws_security_group" "control_plane" {
   name        = "forge-control-plane"
   description = "Forge control-plane ingress"
@@ -241,10 +292,10 @@ resource "aws_instance" "control_plane" {
 resource "aws_instance" "worker" {
   ami                         = local.worker_arch == "arm64" ? data.aws_ami.ubuntu_jammy_arm64.id : data.aws_ami.ubuntu_jammy_x86.id
   instance_type               = var.worker_instance_type
-  subnet_id                   = aws_subnet.public.id
+  subnet_id                   = aws_subnet.private.id
   vpc_security_group_ids      = [aws_security_group.worker.id]
   key_name                    = aws_key_pair.forge.key_name
-  associate_public_ip_address = true
+  associate_public_ip_address = false
 
   root_block_device {
     volume_size = var.root_volume_size_gb

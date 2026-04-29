@@ -48,6 +48,18 @@ variable "public_subnet_cidr" {
   default     = "10.52.1.0/24"
 }
 
+variable "private_subnet_cidr" {
+  description = "CIDR for the private worker subnet."
+  type        = string
+  default     = "10.52.2.0/24"
+}
+
+variable "create_nat_gateway" {
+  description = "Create a NAT gateway for private worker outbound access. Leave true for the standard private-worker layout."
+  type        = bool
+  default     = true
+}
+
 variable "control_plane_instance_type" {
   description = "EC2 instance type for the control plane. t3.micro is broadly Free Tier eligible depending on account terms."
   type        = string
@@ -58,6 +70,12 @@ variable "worker_instance_type" {
   description = "EC2 instance type for the worker. t3.micro is safest for classic Free Tier; t3.small/t4g.small may be eligible for newer accounts."
   type        = string
   default     = "t3.micro"
+}
+
+variable "worker_assign_public_ip" {
+  description = "Legacy compatibility switch for public-worker setups. Private-worker deployments ignore this and keep the worker on a private subnet."
+  type        = bool
+  default     = false
 }
 
 variable "root_volume_size_gb" {

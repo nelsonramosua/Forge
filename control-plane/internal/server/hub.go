@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
+	"time"
 )
 
 type eventHub struct {
@@ -58,6 +59,8 @@ func (h *eventHub) serve(ctx context.Context, w http.ResponseWriter, r *http.Req
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(": connected\n\n"))
 	flusher.Flush()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -65,6 +68,9 @@ func (h *eventHub) serve(ctx context.Context, w http.ResponseWriter, r *http.Req
 			return
 		case <-r.Context().Done():
 			return
+		case <-ticker.C:
+			_, _ = w.Write([]byte(": ping\n\n"))
+			flusher.Flush()
 		case frame := <-ch:
 			_, _ = w.Write(frame)
 			flusher.Flush()

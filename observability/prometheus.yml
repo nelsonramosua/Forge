@@ -1,3 +1,6 @@
+## Reference configuration only.
+## Production deployments install /etc/prometheus/prometheus.yml from the Jinja2 template in infra/ansible/templates/prometheus.yml.j2.
+
 global:
   scrape_interval: 15s
   evaluation_interval: 15s

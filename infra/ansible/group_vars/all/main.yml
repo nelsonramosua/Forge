@@ -7,5 +7,7 @@ ansible_python_interpreter: /usr/bin/python3
 # forge_allowed_repos:
 #   - YOUR_GITHUB_USER/YOUR_REPO
 #
+# This variable is required at runtime; leaving it empty makes the control plane fail fast on startup.
+#
 # forge_allowed_branches:
 #   - main

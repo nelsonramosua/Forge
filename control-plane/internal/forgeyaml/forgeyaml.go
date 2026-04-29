@@ -101,6 +101,9 @@ func validate(cfg Config) (Config, error) {
 	if cfg.Health.Path == "" {
 		cfg.Health.Path = "/"
 	}
+	if !strings.HasPrefix(cfg.Health.Path, "/") {
+		return Config{}, fmt.Errorf("health.path must start with /")
+	}
 	if _, err := time.ParseDuration(cfg.Health.Interval); err != nil {
 		return Config{}, fmt.Errorf("invalid health interval %q", cfg.Health.Interval)
 	}

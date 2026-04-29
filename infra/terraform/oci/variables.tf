@@ -107,7 +107,7 @@ variable "create_nat_gateway" {
 }
 
 variable "worker_assign_public_ip" {
-  description = "Assign a public IP to the worker for outbound Internet without NAT. Inbound traffic is still restricted by security lists."
+  description = "Assign a public IP to the worker for outbound Internet without NAT. Leave false for private-worker deployments; enable only if you need direct Internet access."
   type        = bool
   default     = true
 }

@@ -150,7 +150,23 @@ func (s *Server) handleDeployments(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, deployments)
+	views := make([]deploymentView, 0, len(deployments))
+	for _, deployment := range deployments {
+		views = append(views, deploymentView{
+			ID:              deployment.ID,
+			AppName:         deployment.AppName,
+			RepoURL:         deployment.RepoURL,
+			CommitSHA:       deployment.CommitSHA,
+			Branch:          deployment.Branch,
+			Status:          deployment.Status,
+			AssignedAgentID: deployment.AssignedAgentID,
+			Host:            deployment.Host,
+			TargetPort:      deployment.TargetPort,
+			CreatedAt:       deployment.CreatedAt,
+			UpdatedAt:       deployment.UpdatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, views)
 }
 
 func (s *Server) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
@@ -504,6 +520,11 @@ func (s *Server) handleTaskComplete(w http.ResponseWriter, r *http.Request, task
 
 	if req.Status == "failed" {
 		_ = s.store.UpdateDeploymentStatus(r.Context(), deployment.ID, "failed")
+		if previous, ok, err := s.store.LatestRunningDeploymentByHostExcluding(r.Context(), deployment.Host, deployment.ID); err == nil && ok {
+			if rollbackErr := s.rollbackDeploymentRoute(r.Context(), previous); rollbackErr != nil {
+				log.Printf("rollback failed for deployment %d: %v", deployment.ID, rollbackErr)
+			}
+		}
 		s.hub.publish("deployment", map[string]interface{}{"id": deployment.ID, "status": "failed"})
 		writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
 		return
@@ -616,9 +637,18 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 func (s *Server) schedulerLoop(ctx context.Context) {
 	ticker := time.NewTicker(s.cfg.SchedulerTick)
 	defer ticker.Stop()
+	lastTaskEventPrune := time.Time{}
 	for {
 		if err := s.schedulePending(ctx); err != nil {
 			log.Printf("scheduler: %v", err)
+		}
+		now := time.Now()
+		if lastTaskEventPrune.IsZero() || now.Sub(lastTaskEventPrune) >= 24*time.Hour {
+			if err := s.store.PruneTaskEventsBefore(ctx, now.Add(-30*24*time.Hour)); err != nil {
+				log.Printf("task event retention: %v", err)
+			} else {
+				lastTaskEventPrune = now
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -737,6 +767,10 @@ func (s *Server) enqueueRunTask(ctx context.Context, deployment store.Deployment
 }
 
 func (s *Server) finishRunTask(ctx context.Context, deployment store.Deployment, agentID string, port int) error {
+	previous, hasPrevious, err := s.store.LatestRunningDeploymentByHostExcluding(ctx, deployment.Host, deployment.ID)
+	if err != nil {
+		return err
+	}
 	if port <= 0 {
 		port = deployment.TargetPort
 		if port <= 0 {
@@ -755,9 +789,19 @@ func (s *Server) finishRunTask(ctx context.Context, deployment store.Deployment,
 	}
 	dial := fmt.Sprintf("%s:%d", agent.Address, port)
 	if err := s.proxy.EnsureRoute(ctx, deployment.AppName, deployment.Host, dial); err != nil {
+		if hasPrevious {
+			if rollbackErr := s.rollbackDeploymentRoute(ctx, previous); rollbackErr != nil {
+				return fmt.Errorf("ensure route failed: %w (rollback failed: %v)", err, rollbackErr)
+			}
+		}
 		return err
 	}
 	if err := s.store.MarkDeploymentRunning(ctx, deployment.ID, port); err != nil {
+		if hasPrevious {
+			if rollbackErr := s.rollbackDeploymentRoute(ctx, previous); rollbackErr != nil {
+				return fmt.Errorf("mark running failed: %w (rollback failed: %v)", err, rollbackErr)
+			}
+		}
 		return err
 	}
 	s.hub.publish("deployment", map[string]interface{}{
@@ -765,6 +809,27 @@ func (s *Server) finishRunTask(ctx context.Context, deployment store.Deployment,
 		"status":      "running",
 		"host":        deployment.Host,
 		"target_port": port,
+	})
+	return nil
+}
+
+func (s *Server) rollbackDeploymentRoute(ctx context.Context, deployment store.Deployment) error {
+	agent, ok, err := s.store.GetAgent(ctx, deployment.AssignedAgentID)
+	if err != nil {
+		return err
+	}
+	if !ok || agent.Address == "" || deployment.TargetPort <= 0 {
+		return fmt.Errorf("previous deployment %d is not routable", deployment.ID)
+	}
+	dial := fmt.Sprintf("%s:%d", agent.Address, deployment.TargetPort)
+	if err := s.proxy.EnsureRoute(ctx, deployment.AppName, deployment.Host, dial); err != nil {
+		return err
+	}
+	s.hub.publish("deployment", map[string]interface{}{
+		"id":          deployment.ID,
+		"status":      "running",
+		"host":        deployment.Host,
+		"target_port": deployment.TargetPort,
 	})
 	return nil
 }
@@ -998,6 +1063,15 @@ func (s *Server) repoCloneURL(payload githubPushPayload) (string, error) {
 		if repoURL == "" {
 			return "", fmt.Errorf("repository clone_url is required for local repositories")
 		}
+		if strings.HasPrefix(repoURL, "http://") || strings.HasPrefix(repoURL, "https://") {
+			return repoURL, nil
+		}
+		if strings.HasPrefix(repoURL, "file://") {
+			repoURL = strings.TrimPrefix(repoURL, "file://")
+		}
+		if !filepath.IsAbs(repoURL) {
+			return "", fmt.Errorf("local repo clone_url must be an absolute path or http(s) URL")
+		}
 		return repoURL, nil
 	}
 	if !validRepoName(payload.Repository.FullName) {
@@ -1108,7 +1182,26 @@ func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
+	if status >= http.StatusInternalServerError {
+		log.Printf("http %d: %v", status, err)
+		writeJSON(w, status, map[string]string{"error": http.StatusText(status)})
+		return
+	}
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+type deploymentView struct {
+	ID              int64     `json:"id"`
+	AppName         string    `json:"app_name"`
+	RepoURL         string    `json:"repo_url"`
+	CommitSHA       string    `json:"commit_sha"`
+	Branch          string    `json:"branch"`
+	Status          string    `json:"status"`
+	AssignedAgentID string    `json:"assigned_agent_id"`
+	Host            string    `json:"host"`
+	TargetPort      int       `json:"target_port"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 func methodNotAllowed(w http.ResponseWriter) {

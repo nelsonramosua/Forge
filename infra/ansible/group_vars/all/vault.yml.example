@@ -2,4 +2,9 @@ vault_forge_master_key: "replace-with-32-byte-base64-key"
 vault_forge_agent_token: "replace-with-random-hex-token"
 vault_forge_admin_token: "replace-with-random-hex-token"
 vault_forge_github_webhook_secret: "replace-with-random-hex-secret"
+# Required by the control plane at startup; do not leave empty.
+# Example: forge_allowed_repos:
+#   - YOUR_GITHUB_USER/YOUR_REPO
+forge_allowed_repos:
+  - YOUR_GITHUB_USER/YOUR_REPO
 vault_grafana_admin_password: "replace-with-strong-password"

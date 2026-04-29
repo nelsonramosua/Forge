@@ -9,7 +9,7 @@ availability_domain = ""
 
 # Free-tier friendly defaults:
 # - no NAT gateway, because many Free Tier accounts hit NAT service limits
-# - worker gets a public IP for outbound apt/git, while inbound remains locked by security lists
+# - worker keeps a public IP unless you also have NAT; disable it only when private outbound is available
 # - DNS management is off unless you have OCI DNS zone quota
 create_nat_gateway      = false
 worker_assign_public_ip = true

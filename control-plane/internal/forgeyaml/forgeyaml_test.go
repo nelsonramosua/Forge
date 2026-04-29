@@ -76,3 +76,23 @@ resources:
 		t.Fatalf("unexpected command %q", cfg.Build.Commands[0])
 	}
 }
+
+func TestParseForgeYAMLRejectsInvalidHealthPath(t *testing.T) {
+	input := []byte(`name: myapp
+runtime: python3.11
+build:
+  commands:
+    - echo ok
+run:
+  command: python app.py
+  port: 8000
+resources:
+  memory: 128M
+  cpu: 0.2
+health:
+  path: health
+`)
+	if _, err := Parse(input); err == nil {
+		t.Fatal("expected invalid health path to be rejected")
+	}
+}

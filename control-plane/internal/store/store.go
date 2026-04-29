@@ -257,6 +257,18 @@ func (s *Store) MarkDeploymentRunning(ctx context.Context, id int64, port int) e
 	return err
 }
 
+func (s *Store) LatestRunningDeploymentByHostExcluding(ctx context.Context, host string, excludedID int64) (Deployment, bool, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT * FROM deployments WHERE host=? AND status='running' AND id != ? ORDER BY updated_at DESC LIMIT 1;`, host, excludedID)
+	deployment, err := scanDeployment(row)
+	if err == sql.ErrNoRows {
+		return Deployment{}, false, nil
+	}
+	if err != nil {
+		return Deployment{}, false, err
+	}
+	return deployment, true, nil
+}
+
 func (s *Store) UsedTargetPorts(ctx context.Context, agentID string) (map[int]bool, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT target_port FROM deployments
@@ -384,6 +396,16 @@ VALUES(?, ?, ?, ?, ?);
 	event.ID, _ = result.LastInsertId()
 	event.CreatedAt = parseTime(now)
 	return event, nil
+}
+
+func (s *Store) PruneTaskEventsBefore(ctx context.Context, cutoff time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+DELETE FROM task_events
+WHERE deployment_id IN (
+  SELECT id FROM deployments WHERE updated_at < ?
+);
+`, timestamp(cutoff))
+	return err
 }
 
 func (s *Store) SetSecret(ctx context.Context, secret Secret) error {

@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -22,6 +23,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "json_parser.h"
+
 #define MAX_COMMANDS 32
 #define MAX_ENV 64
 #define READ_CHUNK 4096
@@ -34,6 +37,7 @@ struct agent_config {
     char metrics_socket[256];
     char advertised_address[128];
     int poll_sleep_seconds;
+    int build_timeout_seconds;
     bool require_isolation;
 };
 
@@ -116,10 +120,14 @@ static void load_config(struct agent_config *cfg) {
     snprintf(cfg->runner_path, sizeof(cfg->runner_path), "%s", env_or("FORGE_RUNNER_PATH", "./bin/forge-build-runner"));
     snprintf(cfg->metrics_socket, sizeof(cfg->metrics_socket), "%s", env_or("FORGE_METRICS_SOCKET", "/tmp/forge-agent-metrics.sock"));
     snprintf(cfg->advertised_address, sizeof(cfg->advertised_address), "%s", env_or("FORGE_AGENT_ADDRESS", ""));
-    cfg->require_isolation = env_bool("FORGE_REQUIRE_ISOLATION", false);
+    cfg->require_isolation = env_bool("FORGE_REQUIRE_ISOLATION", true);
     cfg->poll_sleep_seconds = atoi(env_or("FORGE_AGENT_POLL_SECONDS", "2"));
     if (cfg->poll_sleep_seconds <= 0) {
         cfg->poll_sleep_seconds = 2;
+    }
+    cfg->build_timeout_seconds = atoi(env_or("FORGE_BUILD_TIMEOUT", "0"));
+    if (cfg->build_timeout_seconds < 0) {
+        cfg->build_timeout_seconds = 0;
     }
     const char *agent_id = getenv("FORGE_AGENT_ID");
     if (agent_id && agent_id[0]) {
@@ -259,6 +267,14 @@ static int connect_tcp(const char *host, int port) {
         fd = -1;
     }
     freeaddrinfo(result);
+    if (fd >= 0) {
+        struct timeval timeout = {.tv_sec = 30, .tv_usec = 0};
+        if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0 ||
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
+            close(fd);
+            return -1;
+        }
+    }
     return fd;
 }
 
@@ -370,253 +386,80 @@ static void http_response_free(struct http_response *response) {
     response->body = NULL;
 }
 
-static const char *find_json_value(const char *json, const char *key) {
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char *p = json;
-    while ((p = strstr(p, pattern)) != NULL) {
-        p += strlen(pattern);
-        while (*p && isspace((unsigned char)*p)) {
-            p++;
-        }
-        if (*p++ != ':') {
-            continue;
-        }
-        while (*p && isspace((unsigned char)*p)) {
-            p++;
-        }
-        return p;
-    }
-    return NULL;
+static bool task_json_string(const json_value_t *object, const char *key, char *out, size_t out_len) {
+    return json_value_as_string(json_object_get(object, key), out, out_len);
 }
 
-static int hex_value(char c) {
-    if (c >= '0' && c <= '9') {
-        return c - '0';
+static long task_json_long_default(const json_value_t *object, const char *key, long fallback) {
+    long value = fallback;
+    if (json_value_as_long(json_object_get(object, key), &value)) {
+        return value;
     }
-    if (c >= 'a' && c <= 'f') {
-        return c - 'a' + 10;
-    }
-    if (c >= 'A' && c <= 'F') {
-        return c - 'A' + 10;
-    }
-    return -1;
+    return fallback;
 }
 
-static bool append_utf8(char **out, unsigned int codepoint) {
-    if (codepoint <= 0x7F) {
-        *(*out)++ = (char)codepoint;
-        return true;
+static double task_json_double_default(const json_value_t *object, const char *key, double fallback) {
+    double value = fallback;
+    if (json_value_as_double(json_object_get(object, key), &value)) {
+        return value;
     }
-    if (codepoint <= 0x7FF) {
-        *(*out)++ = (char)(0xC0 | (codepoint >> 6));
-        *(*out)++ = (char)(0x80 | (codepoint & 0x3F));
-        return true;
-    }
-    if (codepoint >= 0xD800 && codepoint <= 0xDFFF) {
-        return false;
-    }
-    if (codepoint <= 0xFFFF) {
-        *(*out)++ = (char)(0xE0 | (codepoint >> 12));
-        *(*out)++ = (char)(0x80 | ((codepoint >> 6) & 0x3F));
-        *(*out)++ = (char)(0x80 | (codepoint & 0x3F));
-        return true;
-    }
-    if (codepoint <= 0x10FFFF) {
-        *(*out)++ = (char)(0xF0 | (codepoint >> 18));
-        *(*out)++ = (char)(0x80 | ((codepoint >> 12) & 0x3F));
-        *(*out)++ = (char)(0x80 | ((codepoint >> 6) & 0x3F));
-        *(*out)++ = (char)(0x80 | (codepoint & 0x3F));
-        return true;
-    }
-    return false;
+    return fallback;
 }
 
-static bool parse_unicode_escape(const char **cursor, unsigned int *codepoint) {
-    unsigned int cp = 0;
-    for (int i = 0; i < 4; i++) {
-        int value = hex_value((*cursor)[i]);
-        if (value < 0) {
-            return false;
-        }
-        cp = (cp << 4) | (unsigned int)value;
-    }
-    *cursor += 4;
-    *codepoint = cp;
-    return true;
-}
-
-static bool json_decode_escape(const char **cursor, char **out) {
-    char esc = *(*cursor)++;
-    switch (esc) {
-    case '"':
-    case '\\':
-    case '/':
-        *(*out)++ = esc;
-        return true;
-    case 'b':
-        *(*out)++ = '\b';
-        return true;
-    case 'f':
-        *(*out)++ = '\f';
-        return true;
-    case 'n':
-        *(*out)++ = '\n';
-        return true;
-    case 'r':
-        *(*out)++ = '\r';
-        return true;
-    case 't':
-        *(*out)++ = '\t';
-        return true;
-    case 'u': {
-        unsigned int cp = 0;
-        if (!parse_unicode_escape(cursor, &cp)) {
-            return false;
-        }
-        return append_utf8(out, cp);
-    }
-    default:
-        return false;
-    }
-}
-
-static bool json_decode_escape_char(const char **cursor, unsigned char *out) {
-    char buffer[5] = {0};
-    char *write = buffer;
-    if (!json_decode_escape(cursor, &write)) {
-        return false;
-    }
-    if ((size_t)(write - buffer) != 1) {
-        return false;
-    }
-    *out = (unsigned char)buffer[0];
-    return true;
-}
-
-static bool json_get_string(const char *json, const char *key, char *out, size_t out_len) {
-    const char *p = find_json_value(json, key);
-    if (!p || *p != '"') {
-        return false;
-    }
-    p++;
-    size_t i = 0;
-    while (*p && *p != '"') {
-        unsigned char c = (unsigned char)*p++;
-        if (c == '\\' && *p) {
-            if (!json_decode_escape_char(&p, &c)) {
-                return false;
-            }
-        }
-        if (i + 1 < out_len) {
-            out[i++] = (char)c;
-        }
-    }
-    out[i] = '\0';
-    return true;
-}
-
-static long json_get_long_default(const char *json, const char *key, long fallback) {
-    const char *p = find_json_value(json, key);
-    if (!p) {
-        return fallback;
-    }
-    return strtol(p, NULL, 10);
-}
-
-static double json_get_double_default(const char *json, const char *key, double fallback) {
-    const char *p = find_json_value(json, key);
-    if (!p) {
-        return fallback;
-    }
-    return strtod(p, NULL);
-}
-
-static char *parse_json_string_value(const char **cursor) {
-    const char *p = *cursor;
-    if (*p != '"') {
-        return NULL;
-    }
-    p++;
-    char *out = calloc(1, strlen(p) + 1);
-    if (!out) {
-        return NULL;
-    }
-    char *w = out;
-    while (*p && *p != '"') {
-        unsigned char c = (unsigned char)*p++;
-        if (c == '\\' && *p) {
-            if (!json_decode_escape(&p, &w)) {
-                free(out);
-                return NULL;
-            }
-            continue;
-        }
-        *w++ = (char)c;
-    }
-    if (*p == '"') {
-        p++;
-    }
-    *cursor = p;
-    return out;
-}
-
-static int json_get_string_array(const char *json, const char *key, char **items, int max_items) {
-    const char *p = find_json_value(json, key);
-    if (!p || *p != '[') {
+static int task_json_string_array(const json_value_t *object, const char *key, char **items, int max_items) {
+    const json_value_t *array = json_object_get(object, key);
+    if (!array || max_items <= 0) {
         return 0;
     }
-    p++;
-    int count = 0;
-    while (*p && *p != ']' && count < max_items) {
-        while (*p && (isspace((unsigned char)*p) || *p == ',')) {
-            p++;
-        }
-        if (*p == '"') {
-            items[count++] = parse_json_string_value(&p);
-        } else {
+    size_t count = json_array_size(array);
+    if ((size_t)max_items < count) {
+        count = (size_t)max_items;
+    }
+    int written = 0;
+    for (size_t i = 0; i < count; i++) {
+        const json_value_t *item = json_array_get(array, i);
+        if (!item) {
             break;
         }
+        char *text = json_value_strdup(item);
+        if (!text) {
+            break;
+        }
+        items[written++] = text;
     }
-    return count;
+    return written;
 }
 
-static int json_get_env_object(const char *json, struct env_pair *env, int max_env) {
-    const char *p = find_json_value(json, "env");
-    if (!p || *p != '{') {
+static int task_json_env_object(const json_value_t *object, const char *key, struct env_pair *env, int max_env) {
+    const json_value_t *env_object = json_object_get(object, key);
+    if (!env_object || max_env <= 0) {
         return 0;
     }
-    p++;
-    int count = 0;
-    while (*p && *p != '}' && count < max_env) {
-        while (*p && (isspace((unsigned char)*p) || *p == ',')) {
-            p++;
-        }
-        if (*p != '"') {
-            break;
-        }
-        char *key = parse_json_string_value(&p);
-        while (*p && isspace((unsigned char)*p)) {
-            p++;
-        }
-        if (*p++ != ':') {
-            free(key);
-            break;
-        }
-        while (*p && isspace((unsigned char)*p)) {
-            p++;
-        }
-        char *value = parse_json_string_value(&p);
-        if (!key || !value) {
-            free(key);
-            free(value);
-            break;
-        }
-        env[count].key = key;
-        env[count].value = value;
-        count++;
+    size_t count = json_object_size(env_object);
+    if ((size_t)max_env < count) {
+        count = (size_t)max_env;
     }
-    return count;
+    int written = 0;
+    for (size_t i = 0; i < count; i++) {
+        const char *name = json_object_key_at(env_object, i);
+        const json_value_t *value = json_object_value_at(env_object, i);
+        if (!name || !value) {
+            continue;
+        }
+        char *key_copy = strdup(name);
+        if (!key_copy) {
+            break;
+        }
+        char *value_copy = json_value_strdup(value);
+        if (!value_copy) {
+            free(key_copy);
+            break;
+        }
+        env[written].key = key_copy;
+        env[written].value = value_copy;
+        written++;
+    }
+    return written;
 }
 
 static void task_free(struct task *task) {
@@ -630,22 +473,39 @@ static void task_free(struct task *task) {
 }
 
 static bool parse_task(const char *json, struct task *task) {
+    char *error = NULL;
+    json_value_t *root = json_parse(json, &error);
+    if (!root) {
+        fprintf(stderr, "forge-agent: json parse failed: %s\n", error ? error : "unknown error");
+        free(error);
+        return false;
+    }
+    if (json_object_size(root) == 0) {
+        free(error);
+        json_value_free(root);
+        return false;
+    }
     memset(task, 0, sizeof(*task));
-    task->id = json_get_long_default(json, "id", 0);
-    task->deployment_id = json_get_long_default(json, "deployment_id", 0);
-    task->port = (int)json_get_long_default(json, "port", 0);
-    task->memory_bytes = json_get_long_default(json, "memory_bytes", 0);
-    task->cpu = json_get_double_default(json, "cpu", 0.0);
-    task->health_retries = (int)json_get_long_default(json, "retries", 3);
-    json_get_string(json, "type", task->type, sizeof(task->type));
-    json_get_string(json, "app_name", task->app_name, sizeof(task->app_name));
-    json_get_string(json, "repo_url", task->repo_url, sizeof(task->repo_url));
-    json_get_string(json, "commit_sha", task->commit_sha, sizeof(task->commit_sha));
-    json_get_string(json, "workdir", task->workdir, sizeof(task->workdir));
-    json_get_string(json, "run_command", task->run_command, sizeof(task->run_command));
-    json_get_string(json, "path", task->health_path, sizeof(task->health_path));
-    json_get_string(json, "interval", task->health_interval, sizeof(task->health_interval));
-    json_get_string(json, "timeout", task->health_timeout, sizeof(task->health_timeout));
+    task->id = task_json_long_default(root, "id", 0);
+    task->deployment_id = task_json_long_default(root, "deployment_id", 0);
+    task->port = (int)task_json_long_default(root, "port", 0);
+    task->memory_bytes = task_json_long_default(root, "memory_bytes", 0);
+    task->cpu = task_json_double_default(root, "cpu", 0.0);
+    task->health_retries = (int)task_json_long_default(root, "retries", 3);
+    bool ok = true;
+    ok &= task_json_string(root, "type", task->type, sizeof(task->type));
+    ok &= task_json_string(root, "app_name", task->app_name, sizeof(task->app_name));
+    ok &= task_json_string(root, "repo_url", task->repo_url, sizeof(task->repo_url));
+    ok &= task_json_string(root, "commit_sha", task->commit_sha, sizeof(task->commit_sha));
+    ok &= task_json_string(root, "workdir", task->workdir, sizeof(task->workdir));
+    ok &= task_json_string(root, "run_command", task->run_command, sizeof(task->run_command));
+    const json_value_t *health = json_object_get(root, "health");
+    if (health) {
+        ok &= task_json_string(health, "path", task->health_path, sizeof(task->health_path));
+        ok &= task_json_string(health, "interval", task->health_interval, sizeof(task->health_interval));
+        ok &= task_json_string(health, "timeout", task->health_timeout, sizeof(task->health_timeout));
+        task->health_retries = (int)task_json_long_default(health, "retries", task->health_retries);
+    }
     if (!task->health_path[0]) {
         snprintf(task->health_path, sizeof(task->health_path), "/");
     }
@@ -655,9 +515,11 @@ static bool parse_task(const char *json, struct task *task) {
     if (!task->health_timeout[0]) {
         snprintf(task->health_timeout, sizeof(task->health_timeout), "3s");
     }
-    task->build_command_count = json_get_string_array(json, "build_commands", task->build_commands, MAX_COMMANDS);
-    task->env_count = json_get_env_object(json, task->env, MAX_ENV);
-    return task->id > 0 && task->deployment_id > 0 && task->type[0] && task->workdir[0];
+    task->build_command_count = task_json_string_array(root, "build_commands", task->build_commands, MAX_COMMANDS);
+    task->env_count = task_json_env_object(root, "env", task->env, MAX_ENV);
+    json_value_free(root);
+    free(error);
+    return ok && task->id > 0 && task->deployment_id > 0 && task->type[0] && task->workdir[0];
 }
 
 static long read_meminfo_kb(const char *key) {
@@ -755,7 +617,7 @@ static int complete_task(const struct agent_config *cfg, long task_id, const cha
     return rc;
 }
 
-static int run_capture(const struct agent_config *cfg, long task_id, char *const argv[], const char *cwd) {
+static int run_capture(const struct agent_config *cfg, long task_id, char *const argv[], const char *cwd, int timeout_seconds) {
     int pipefd[2];
     if (pipe(pipefd) < 0) {
         return 127;
@@ -783,7 +645,48 @@ static int run_capture(const struct agent_config *cfg, long task_id, char *const
     }
     close(pipefd[1]);
     char buffer[READ_CHUNK + 1];
+    bool timed_out = false;
+    struct timespec start;
+    if (timeout_seconds > 0) {
+        clock_gettime(CLOCK_MONOTONIC, &start);
+    }
     while (true) {
+        if (timeout_seconds > 0 && !timed_out) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000L + (now.tv_nsec - start.tv_nsec) / 1000000L;
+            long deadline_ms = (long)timeout_seconds * 1000L;
+            if (elapsed_ms >= deadline_ms) {
+                timed_out = true;
+                kill(pid, SIGKILL);
+            }
+        }
+
+        int wait_ms = 1000;
+        if (timeout_seconds > 0 && !timed_out) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000L + (now.tv_nsec - start.tv_nsec) / 1000000L;
+            long remaining_ms = (long)timeout_seconds * 1000L - elapsed_ms;
+            if (remaining_ms < wait_ms) {
+                wait_ms = (int)remaining_ms;
+            }
+            if (wait_ms < 1) {
+                wait_ms = 1;
+            }
+        }
+
+        struct pollfd pfd = {.fd = pipefd[0], .events = POLLIN | POLLHUP};
+        int pr = poll(&pfd, 1, wait_ms);
+        if (pr < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        if (pr == 0) {
+            continue;
+        }
         ssize_t n = read(pipefd[0], buffer, READ_CHUNK);
         if (n < 0) {
             if (errno == EINTR) {
@@ -801,6 +704,9 @@ static int run_capture(const struct agent_config *cfg, long task_id, char *const
     close(pipefd[0]);
     int status = 0;
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+    if (timed_out) {
+        return 124;
     }
     if (WIFEXITED(status)) {
         return WEXITSTATUS(status);
@@ -841,7 +747,7 @@ static int ensure_repo(const struct agent_config *cfg, const struct task *task, 
     join_path(src, src_len, task->workdir, "src");
     if (!file_exists(src)) {
         char *clone_argv[] = {"git", "clone", "--depth=1", (char *)task->repo_url, src, NULL};
-        int code = run_capture(cfg, task->id, clone_argv, NULL);
+        int code = run_capture(cfg, task->id, clone_argv, NULL, 0);
         if (code != 0) {
             return code;
         }
@@ -852,14 +758,14 @@ static int ensure_repo(const struct agent_config *cfg, const struct task *task, 
             return 1;
         }
         char *checkout_argv[] = {"git", "-C", src, "checkout", "--detach", (char *)task->commit_sha, NULL};
-        int code = run_capture(cfg, task->id, checkout_argv, NULL);
+        int code = run_capture(cfg, task->id, checkout_argv, NULL, 0);
         if (code != 0) {
             char *fetch_argv[] = {"git", "-C", src, "fetch", "--depth=1", "origin", (char *)task->commit_sha, NULL};
-            int fetch_code = run_capture(cfg, task->id, fetch_argv, NULL);
+            int fetch_code = run_capture(cfg, task->id, fetch_argv, NULL, 0);
             if (fetch_code != 0) {
                 return fetch_code;
             }
-            code = run_capture(cfg, task->id, checkout_argv, NULL);
+            code = run_capture(cfg, task->id, checkout_argv, NULL, 0);
             if (code != 0) {
                 return code;
             }
@@ -908,9 +814,13 @@ static int run_build_task(const struct agent_config *cfg, const struct task *tas
         argv[arg++] = "-lc";
         argv[arg++] = task->build_commands[i];
         argv[arg] = NULL;
-        code = run_capture(cfg, task->id, argv, NULL);
+        code = run_capture(cfg, task->id, argv, NULL, cfg->build_timeout_seconds);
         if (code != 0) {
-            complete_task(cfg, task->id, "failed", "build command failed", 0, 0);
+            if (code == 124) {
+                complete_task(cfg, task->id, "failed", "build command timed out", 0, 0);
+            } else {
+                complete_task(cfg, task->id, "failed", "build command failed", 0, 0);
+            }
             return code;
         }
     }
