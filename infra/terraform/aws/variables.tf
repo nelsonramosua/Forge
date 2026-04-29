@@ -12,6 +12,11 @@ variable "base_domain" {
 variable "admin_cidr" {
   description = "CIDR allowed to SSH and reach admin UIs such as Prometheus and Grafana."
   type        = string
+
+  validation {
+    condition     = can(cidrnetmask(var.admin_cidr)) && var.admin_cidr != "0.0.0.0/0"
+    error_message = "admin_cidr must be a valid IPv4 CIDR and must not be 0.0.0.0/0."
+  }
 }
 
 variable "ssh_public_key_path" {

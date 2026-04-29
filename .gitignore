@@ -1,4 +1,5 @@
 bin/
+/.bin-nobody/
 data/
 .codex
 .vscode/
@@ -17,6 +18,7 @@ build/
 *.db-wal
 infra/ansible/inventory.ini
 infra/ansible/group_vars/all/vault.yml
+infra/ansible/group_vars/all/*.local.yml
 infra/ansible/*.vault-password
 infra/terraform/**/.terraform/
 infra/terraform/**/*.tfstate

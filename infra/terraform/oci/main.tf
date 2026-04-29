@@ -125,17 +125,6 @@ resource "oci_core_security_list" "public" {
   }
 
   ingress_security_rules {
-    description = "Control-plane API from admin network"
-    protocol    = "6"
-    source      = var.admin_cidr
-
-    tcp_options {
-      min = 8080
-      max = 8080
-    }
-  }
-
-  ingress_security_rules {
     description = "Prometheus from admin network"
     protocol    = "6"
     source      = var.admin_cidr
@@ -219,8 +208,8 @@ resource "oci_core_security_list" "private" {
     source      = var.vcn_cidr
 
     tcp_options {
-      min = 1024
-      max = 65535
+      min = 20000
+      max = 39999
     }
   }
 }
@@ -276,6 +265,10 @@ resource "oci_core_instance" "control_plane" {
     boot_volume_size_in_gbs = var.boot_volume_size_gbs
   }
 
+  instance_options {
+    are_legacy_imds_endpoints_disabled = true
+  }
+
   metadata = {
     ssh_authorized_keys = file(var.ssh_public_key_path)
   }
@@ -306,6 +299,10 @@ resource "oci_core_instance" "worker" {
     source_type             = "image"
     source_id               = data.oci_core_images.ubuntu_a1.images[0].id
     boot_volume_size_in_gbs = var.boot_volume_size_gbs
+  }
+
+  instance_options {
+    are_legacy_imds_endpoints_disabled = true
   }
 
   metadata = {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -47,6 +48,7 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := os.MkdirAll(s.cfg.WorkDir, 0755); err != nil {
 		return err
 	}
+	go s.syncRunningRoutesWithRetry(ctx)
 	go s.schedulerLoop(ctx)
 
 	httpServer := &http.Server{
@@ -69,11 +71,57 @@ func (s *Server) Run(ctx context.Context) error {
 	return err
 }
 
+func (s *Server) syncRunningRoutesWithRetry(ctx context.Context) {
+	for attempt := 1; attempt <= 5; attempt++ {
+		if err := s.syncRunningRoutes(ctx); err != nil {
+			log.Printf("caddy route sync failed on attempt %d: %v", attempt, err)
+		} else {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func (s *Server) syncRunningRoutes(ctx context.Context) error {
+	if !s.proxy.Enabled() {
+		return nil
+	}
+	deployments, err := s.store.ListDeploymentsByStatus(ctx, "running")
+	if err != nil {
+		return err
+	}
+	for _, deployment := range deployments {
+		if deployment.AssignedAgentID == "" || deployment.TargetPort <= 0 || deployment.Host == "" {
+			continue
+		}
+		agent, ok, err := s.store.GetAgent(ctx, deployment.AssignedAgentID)
+		if err != nil {
+			return err
+		}
+		if !ok || agent.Address == "" {
+			continue
+		}
+		dial := fmt.Sprintf("%s:%d", agent.Address, deployment.TargetPort)
+		if err := s.proxy.EnsureRoute(ctx, deployment.AppName, deployment.Host, dial); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Server) routes(ctx context.Context) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/metrics", s.handleMetrics)
+	mux.HandleFunc("/api/v1/tls/ask", s.handleTLSAsk)
 	mux.HandleFunc("/api/v1/events", func(w http.ResponseWriter, r *http.Request) {
+		if !s.authorizeAdmin(w, r) {
+			return
+		}
 		s.hub.serve(ctx, w, r)
 	})
 	mux.HandleFunc("/api/v1/webhook/github", s.handleGitHubWebhook)
@@ -105,6 +153,38 @@ func (s *Server) handleDeployments(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, deployments)
 }
 
+func (s *Server) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	domain := normalizeDomain(r.URL.Query().Get("domain"))
+	allowed, err := s.tlsDomainAllowed(r.Context(), domain)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !allowed {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) tlsDomainAllowed(ctx context.Context, domain string) (bool, error) {
+	if !validDNSName(domain) {
+		return false, nil
+	}
+	base := normalizeDomain(s.cfg.BaseDomain)
+	if domain == base {
+		return true, nil
+	}
+	if !strings.HasSuffix(domain, "."+base) {
+		return false, nil
+	}
+	return s.store.HasRunningDeploymentHost(ctx, domain)
+}
+
 func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -115,8 +195,17 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if s.cfg.WebhookSecret != "" && !verifyGitHubSignature(body, s.cfg.WebhookSecret, r.Header.Get("X-Hub-Signature-256")) {
+	if !verifyGitHubSignature(body, s.cfg.WebhookSecret, r.Header.Get("X-Hub-Signature-256")) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid github signature"})
+		return
+	}
+	event := r.Header.Get("X-GitHub-Event")
+	if event != "push" {
+		if event == "ping" {
+			writeJSON(w, http.StatusAccepted, map[string]string{"status": "pong"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported github event"})
 		return
 	}
 
@@ -125,19 +214,34 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	repoURL := payload.Repository.CloneURL
-	if repoURL == "" {
-		repoURL = payload.Repository.URL
+	if !validCommitSHA(payload.After) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid commit sha"})
+		return
 	}
-	if repoURL == "" {
-		repoURL = payload.Repository.HTMLURL
+	branch, ok := branchFromRef(payload.Ref)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "only branch push events are supported"})
+		return
 	}
-	if repoURL == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repository clone_url is required"})
+	if !s.branchAllowed(branch) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "branch is not allowed"})
+		return
+	}
+	if !validRepoName(payload.Repository.FullName) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repository full_name"})
+		return
+	}
+	if !s.repoAllowed(payload.Repository.FullName) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "repository is not allowed"})
+		return
+	}
+	repoURL, err := s.repoCloneURL(payload)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 
-	appConfig, err := s.cloneAndParseForgeYAML(r.Context(), repoURL, payload.After)
+	appConfig, err := s.cloneAndParseForgeYAML(r.Context(), repoURL, branch, payload.After)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -152,7 +256,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		AppName:    appConfig.Name,
 		RepoURL:    repoURL,
 		CommitSHA:  payload.After,
-		Branch:     branchFromRef(payload.Ref),
+		Branch:     branch,
 		Status:     "pending",
 		ConfigJSON: string(configJSON),
 		Host:       sanitizeHost(appConfig.Name) + "." + strings.TrimPrefix(s.cfg.BaseDomain, "."),
@@ -474,6 +578,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	if !s.authorizeLocalhostOrAdmin(w, r) {
+		return
+	}
 	ctx := r.Context()
 	deploymentCounts, err := s.store.DeploymentCounts(ctx)
 	if err != nil {
@@ -533,13 +640,21 @@ func (s *Server) schedulePending(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	activeTasks, err := s.store.ActiveTaskCountsByAgent(ctx)
+	if err != nil {
+		return err
+	}
+	scheduled := 0
 	for _, deployment := range deployments {
+		if scheduled >= s.cfg.MaxScheduleBatch {
+			return nil
+		}
 		var appConfig forgeyaml.Config
 		if err := json.Unmarshal([]byte(deployment.ConfigJSON), &appConfig); err != nil {
 			_ = s.store.UpdateDeploymentStatus(ctx, deployment.ID, "failed")
 			continue
 		}
-		agent, ok := chooseAgent(agents, appConfig.Resources.CPU, appConfig.Resources.MemoryBytes)
+		agent, ok := chooseAgent(agentsWithTaskCapacity(agents, activeTasks, s.cfg.MaxTasksPerAgent), appConfig.Resources.CPU, appConfig.Resources.MemoryBytes)
 		if !ok {
 			continue
 		}
@@ -561,9 +676,24 @@ func (s *Server) schedulePending(ctx context.Context) error {
 		if err := s.store.UpdateDeploymentAssignment(ctx, deployment.ID, agent.ID, "building"); err != nil {
 			return err
 		}
+		activeTasks[agent.ID]++
+		scheduled++
 		s.hub.publish("deployment", map[string]interface{}{"id": deployment.ID, "status": "building", "agent_id": agent.ID})
 	}
 	return nil
+}
+
+func agentsWithTaskCapacity(agents []store.Agent, activeTasks map[string]int, maxTasks int) []store.Agent {
+	if maxTasks <= 0 {
+		maxTasks = 1
+	}
+	available := make([]store.Agent, 0, len(agents))
+	for _, agent := range agents {
+		if activeTasks[agent.ID] < maxTasks {
+			available = append(available, agent)
+		}
+	}
+	return available
 }
 
 func (s *Server) enqueueRunTask(ctx context.Context, deployment store.Deployment, agentID string) error {
@@ -708,20 +838,24 @@ func chooseDeploymentPort(deploymentID int64, used map[int]bool, start int, end 
 	return 0, fmt.Errorf("no free app ports in range %d-%d", start, end)
 }
 
-func (s *Server) cloneAndParseForgeYAML(ctx context.Context, repoURL string, commit string) (forgeyaml.Config, error) {
+func (s *Server) cloneAndParseForgeYAML(ctx context.Context, repoURL string, branch string, commit string) (forgeyaml.Config, error) {
 	target := filepath.Join(s.cfg.WorkDir, "repos", strconv.FormatInt(time.Now().UnixNano(), 10))
+	defer os.RemoveAll(target)
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 		return forgeyaml.Config{}, err
 	}
 	cloneCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(cloneCtx, "git", "clone", "--depth=1", repoURL, target)
+	cmd := exec.CommandContext(cloneCtx, "git", "clone", "--depth=1", "--branch", branch, repoURL, target)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return forgeyaml.Config{}, fmt.Errorf("git clone failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	if commit != "" {
-		checkout := exec.CommandContext(cloneCtx, "git", "-C", target, "checkout", commit)
+		if !validCommitSHA(commit) {
+			return forgeyaml.Config{}, fmt.Errorf("invalid commit sha")
+		}
+		checkout := exec.CommandContext(cloneCtx, "git", "-C", target, "checkout", "--detach", commit)
 		if output, err := checkout.CombinedOutput(); err != nil {
 			return forgeyaml.Config{}, fmt.Errorf("git checkout failed: %w: %s", err, strings.TrimSpace(string(output)))
 		}
@@ -755,6 +889,9 @@ func chooseAgent(agents []store.Agent, requiredCPU float64, requiredMemory int64
 }
 
 func verifyGitHubSignature(body []byte, secret string, signature string) bool {
+	if secret == "" {
+		return false
+	}
 	const prefix = "sha256="
 	if !strings.HasPrefix(signature, prefix) {
 		return false
@@ -767,8 +904,106 @@ func verifyGitHubSignature(body []byte, secret string, signature string) bool {
 	return hmac.Equal([]byte(signature), expected)
 }
 
-func branchFromRef(ref string) string {
-	return strings.TrimPrefix(ref, "refs/heads/")
+func branchFromRef(ref string) (string, bool) {
+	const prefix = "refs/heads/"
+	if !strings.HasPrefix(ref, prefix) {
+		return "", false
+	}
+	branch := strings.TrimPrefix(ref, prefix)
+	return branch, isSafeBranchName(branch)
+}
+
+func validCommitSHA(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validRepoName(value string) bool {
+	owner, repo, ok := strings.Cut(value, "/")
+	if !ok || owner == "" || repo == "" || strings.Contains(repo, "/") {
+		return false
+	}
+	return safeRepoPart(owner) && safeRepoPart(repo)
+}
+
+func safeRepoPart(value string) bool {
+	if value == "." || value == ".." || strings.HasPrefix(value, ".") || strings.HasPrefix(value, "-") {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isSafeBranchName(value string) bool {
+	if value == "" || strings.HasPrefix(value, "-") || strings.HasPrefix(value, "/") || strings.HasSuffix(value, "/") {
+		return false
+	}
+	if strings.Contains(value, "..") || strings.Contains(value, "@{") || strings.Contains(value, "\\") {
+		return false
+	}
+	if strings.HasSuffix(value, ".lock") {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		switch r {
+		case '/', '.', '_', '-':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) repoAllowed(fullName string) bool {
+	for _, allowed := range s.cfg.AllowedRepos {
+		if strings.EqualFold(allowed, fullName) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) branchAllowed(branch string) bool {
+	for _, allowed := range s.cfg.AllowedBranches {
+		if allowed == branch {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) repoCloneURL(payload githubPushPayload) (string, error) {
+	if s.cfg.AllowLocalRepos && strings.HasPrefix(strings.ToLower(payload.Repository.FullName), "local/") {
+		repoURL := strings.TrimSpace(payload.Repository.CloneURL)
+		if repoURL == "" {
+			repoURL = strings.TrimSpace(payload.Repository.URL)
+		}
+		if repoURL == "" {
+			return "", fmt.Errorf("repository clone_url is required for local repositories")
+		}
+		return repoURL, nil
+	}
+	if !validRepoName(payload.Repository.FullName) {
+		return "", fmt.Errorf("invalid repository full_name")
+	}
+	return "https://github.com/" + payload.Repository.FullName + ".git", nil
 }
 
 func sanitizeHost(value string) string {
@@ -794,11 +1029,31 @@ func sanitizeHost(value string) string {
 	return out
 }
 
-func (s *Server) authorizeAgent(w http.ResponseWriter, r *http.Request) bool {
-	if s.cfg.AgentToken == "" {
-		return true
+func normalizeDomain(value string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
+}
+
+func validDNSName(value string) bool {
+	if value == "" || len(value) > 253 || strings.ContainsAny(value, "*:/\\") {
+		return false
 	}
-	if bearerToken(r) == s.cfg.AgentToken || r.Header.Get("X-Forge-Agent-Token") == s.cfg.AgentToken {
+	labels := strings.Split(value, ".")
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false
+		}
+		for _, r := range label {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) authorizeAgent(w http.ResponseWriter, r *http.Request) bool {
+	if constantTimeTokenEqual(bearerToken(r), s.cfg.AgentToken) || constantTimeTokenEqual(r.Header.Get("X-Forge-Agent-Token"), s.cfg.AgentToken) {
 		return true
 	}
 	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid agent token"})
@@ -806,14 +1061,29 @@ func (s *Server) authorizeAgent(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *Server) authorizeAdmin(w http.ResponseWriter, r *http.Request) bool {
-	if s.cfg.AdminToken == "" {
-		return true
-	}
-	if bearerToken(r) == s.cfg.AdminToken {
+	if constantTimeTokenEqual(bearerToken(r), s.cfg.AdminToken) {
 		return true
 	}
 	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid admin token"})
 	return false
+}
+
+func (s *Server) authorizeLocalhostOrAdmin(w http.ResponseWriter, r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		ip := net.ParseIP(host)
+		if ip != nil && ip.IsLoopback() {
+			return true
+		}
+	}
+	return s.authorizeAdmin(w, r)
+}
+
+func constantTimeTokenEqual(got string, want string) bool {
+	if got == "" || want == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 func bearerToken(r *http.Request) string {

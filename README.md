@@ -6,8 +6,8 @@ Forge is a mini Render/Fly.io-style deployment platform designed for self-hostin
 
 - **Control plane:** Go REST API, GitHub webhook validation, SSE event stream, scheduler, SQLite WAL state, encrypted secret vault, and Caddy Admin API integration.
 - **forge-agent:** C11 worker process that polls for tasks, streams logs to the control plane, reports `/proc` metrics, launches app processes, and exposes Prometheus metrics through a Unix socket.
-- **Build runner:** C11 Linux runner that applies cgroups v2 and attempts PID, mount, and network namespaces without Docker.
-- **Reverse proxy:** Caddy dynamic JSON config via the Admin API on `:2019`.
+- **Build runner:** C11 Linux runner that applies cgroups v2 and uses Linux user, PID, and mount namespaces without Docker.
+- **Reverse proxy:** Caddy dynamic JSON config via the Admin API on `:2019`, with On-Demand TLS for app subdomains.
 - **Observability:** Prometheus scrape configs, Alertmanager alerts, Grafana dashboard, and a small Unix-socket exporter.
 - **Infrastructure:** Terraform stacks for AWS Free Tier-style deployments and OCI Always Free experiments, plus Ansible bootstrapping for the control plane and workers.
 
@@ -56,9 +56,21 @@ make build
 make test
 ```
 
-The control plane intentionally uses the system `sqlite3` executable so the project builds with the Go standard library in restricted environments. The Ansible playbook installs `sqlite3` on hosts.
+The control plane uses `database/sql` with the pure-Go `modernc.org/sqlite` driver, so runtime queries use prepared statements instead of shelling out to the `sqlite3` CLI.
 
 ## Run Locally
+
+Generate one local set of credentials and use the same values in the control-plane and agent terminals:
+
+```sh
+export FORGE_MASTER_KEY="$(openssl rand -base64 32)"
+export FORGE_AGENT_TOKEN="$(openssl rand -hex 32)"
+export FORGE_ADMIN_TOKEN="$(openssl rand -hex 32)"
+export FORGE_GITHUB_WEBHOOK_SECRET="$(openssl rand -hex 32)"
+export FORGE_ALLOWED_REPOS=local/smokeapp
+export FORGE_ALLOWED_BRANCHES=main
+export FORGE_ALLOW_LOCAL_REPOS=true
+```
 
 Terminal 1:
 
@@ -76,6 +88,7 @@ Terminal 2:
 FORGE_CONTROL_PLANE_URL=http://127.0.0.1:8080 \
 FORGE_RUNNER_PATH=./bin/forge-build-runner \
 FORGE_METRICS_SOCKET=/tmp/forge-agent-metrics.sock \
+FORGE_AGENT_TOKEN="$FORGE_AGENT_TOKEN" \
 make run-agent
 ```
 
@@ -88,18 +101,18 @@ FORGE_AGENT_METRICS_SOCKET=/tmp/forge-agent-metrics.sock ./bin/forge-exporter
 ## API Surface
 
 - `POST /api/v1/webhook/github`: validates `X-Hub-Signature-256`, clones the repo, parses `forge.yaml`, and creates a pending deployment.
-- `GET /api/v1/events`: SSE stream for deployment and log events.
+- `GET /api/v1/events`: authenticated SSE stream for deployment and log events.
 - `GET /api/v1/deployments`: lists recent deployments.
 - `PUT /api/v1/apps/{app}/secrets/{key}`: encrypts and stores a secret value.
-- `GET /metrics`: Prometheus metrics for the control plane.
+- `GET /metrics`: Prometheus metrics for the control plane. Loopback is allowed for Prometheus; remote requests require the admin token.
 - Agent endpoints under `/api/v1/agents` and `/api/v1/tasks` support registration, heartbeats, polling, log events, and task completion.
 
-Set `FORGE_AGENT_TOKEN` to require bearer auth for agents and `FORGE_ADMIN_TOKEN` to require bearer auth for admin APIs.
+Production startup fails closed unless `FORGE_MASTER_KEY`, `FORGE_AGENT_TOKEN`, `FORGE_ADMIN_TOKEN`, `FORGE_GITHUB_WEBHOOK_SECRET`, and `FORGE_ALLOWED_REPOS` are set. GitHub webhooks must be signed, must target an allowed `owner/repo`, and must push an allowed branch.
 
 ## Deployment Workflow
 
 1. GitHub sends a push webhook.
-2. The control plane validates HMAC-SHA256, shallow-clones the repo, and parses `forge.yaml`.
+2. The control plane validates HMAC-SHA256, repository allowlist, branch allowlist, commit SHA format, shallow-clones the repo, and parses `forge.yaml`.
 3. The scheduler chooses the online worker with the most CPU and memory headroom.
 4. The agent claims a build task, clones the app repo, and invokes `forge-build-runner` for each build command.
 5. The build runner applies cgroup limits and attempts Linux namespace isolation before executing the command.

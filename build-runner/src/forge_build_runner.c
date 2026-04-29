@@ -22,15 +22,17 @@ struct runner_config {
     const char *memory_bytes;
     const char *cpu_quota;
     char **command;
+    bool require_isolation;
 };
 
 struct child_config {
     const struct runner_config *cfg;
+    int sync_fd;
 };
 
 static void usage(const char *program) {
     fprintf(stderr,
-            "usage: %s --workdir DIR --cgroup NAME [--memory-bytes BYTES] [--cpu-quota QUOTA] -- COMMAND [ARGS...]\n",
+            "usage: %s [--require-isolation] --workdir DIR --cgroup NAME [--memory-bytes BYTES] [--cpu-quota QUOTA] -- COMMAND [ARGS...]\n",
             program);
 }
 
@@ -113,6 +115,13 @@ static int child_main(void *arg) {
     struct child_config *child = (struct child_config *)arg;
     const struct runner_config *cfg = child->cfg;
 
+    if (child->sync_fd >= 0) {
+        char ready = 0;
+        if (read(child->sync_fd, &ready, 1) != 1) {
+            _exit(127);
+        }
+        close(child->sync_fd);
+    }
     if (chdir(cfg->workdir) < 0) {
         fprintf(stderr, "forge-build-runner: chdir(%s): %s\n", cfg->workdir, strerror(errno));
         _exit(127);
@@ -157,24 +166,84 @@ static int run_with_fork(const struct runner_config *cfg, const char *cgroup_pat
     return wait_for_child(pid);
 }
 
+static int write_id_map(pid_t pid, const char *name, uid_t inside, uid_t outside) {
+    char path[128];
+    char value[128];
+    snprintf(path, sizeof(path), "/proc/%ld/%s", (long)pid, name);
+    snprintf(value, sizeof(value), "%ld %ld 1\n", (long)inside, (long)outside);
+    return write_file(path, value);
+}
+
+static int setup_user_namespace(pid_t pid) {
+    char path[128];
+    snprintf(path, sizeof(path), "/proc/%ld/setgroups", (long)pid);
+    if (write_file(path, "deny\n") < 0 && errno != ENOENT) {
+        return -1;
+    }
+    if (write_id_map(pid, "uid_map", 0, getuid()) < 0) {
+        return -1;
+    }
+    if (write_id_map(pid, "gid_map", 0, getgid()) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
 static int run_isolated(const struct runner_config *cfg, const char *cgroup_path) {
     void *stack = malloc(STACK_SIZE);
     if (!stack) {
+        if (cfg->require_isolation) {
+            fprintf(stderr, "forge-build-runner: cannot allocate namespace stack\n");
+            return 127;
+        }
         return run_with_fork(cfg, cgroup_path);
     }
-    struct child_config child = {.cfg = cfg};
-    int flags = CLONE_NEWPID | CLONE_NEWNS | SIGCHLD;
+    int sync_pipe[2];
+    if (pipe(sync_pipe) < 0) {
+        free(stack);
+        if (cfg->require_isolation) {
+            fprintf(stderr, "forge-build-runner: cannot create namespace sync pipe: %s\n", strerror(errno));
+            return 127;
+        }
+        return run_with_fork(cfg, cgroup_path);
+    }
+    struct child_config child = {.cfg = cfg, .sync_fd = sync_pipe[0]};
+    int flags = CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNS | SIGCHLD;
     pid_t pid = clone(child_main, (char *)stack + STACK_SIZE, flags, &child);
+    close(sync_pipe[0]);
     if (pid < 0) {
+        close(sync_pipe[1]);
         if (errno == EPERM || errno == EINVAL) {
-            fprintf(stderr, "forge-build-runner: namespaces unavailable, falling back to fork: %s\n", strerror(errno));
+            fprintf(stderr, "forge-build-runner: namespaces unavailable: %s\n", strerror(errno));
             free(stack);
+            if (cfg->require_isolation) {
+                return 127;
+            }
             return run_with_fork(cfg, cgroup_path);
         }
         perror("forge-build-runner: clone");
         free(stack);
         return 127;
     }
+    if (setup_user_namespace(pid) < 0) {
+        fprintf(stderr, "forge-build-runner: user namespace setup failed: %s\n", strerror(errno));
+        close(sync_pipe[1]);
+        int code = wait_for_child(pid);
+        free(stack);
+        if (cfg->require_isolation) {
+            return 127;
+        }
+        return code == 127 ? run_with_fork(cfg, cgroup_path) : code;
+    }
+    if (write(sync_pipe[1], "1", 1) != 1) {
+        fprintf(stderr, "forge-build-runner: namespace sync failed: %s\n", strerror(errno));
+        close(sync_pipe[1]);
+        kill(pid, SIGKILL);
+        int code = wait_for_child(pid);
+        free(stack);
+        return code;
+    }
+    close(sync_pipe[1]);
     attach_pid_to_cgroup(cgroup_path, pid);
     int code = wait_for_child(pid);
     free(stack);
@@ -190,6 +259,10 @@ static bool parse_args(int argc, char **argv, struct runner_config *cfg) {
             }
             cfg->command = &argv[i + 1];
             break;
+        }
+        if (strcmp(argv[i], "--require-isolation") == 0) {
+            cfg->require_isolation = true;
+            continue;
         }
         if (i + 1 >= argc) {
             return false;

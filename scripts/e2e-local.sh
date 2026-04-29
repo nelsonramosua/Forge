@@ -61,6 +61,7 @@ HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 PY
 
 git -C "${APP_REPO}" init -q
+git -C "${APP_REPO}" checkout -q -b main
 git -C "${APP_REPO}" add forge.yaml app.py
 git -C "${APP_REPO}" -c user.name=Forge -c user.email=forge@example.test commit -q -m "initial smoke app"
 COMMIT_SHA="$(git -C "${APP_REPO}" rev-parse HEAD)"
@@ -80,16 +81,25 @@ FORGE_MASTER_KEY="${MASTER_KEY}" \
 FORGE_AGENT_TOKEN="${AGENT_TOKEN}" \
 FORGE_ADMIN_TOKEN="${ADMIN_TOKEN}" \
 FORGE_GITHUB_WEBHOOK_SECRET="${WEBHOOK_SECRET}" \
+FORGE_ALLOWED_REPOS=local/smokeapp \
+FORGE_ALLOWED_BRANCHES=main \
+FORGE_ALLOW_LOCAL_REPOS=true \
 "${ROOT_DIR}/bin/forge-control-plane" >"${TMP_DIR}/control-plane.log" 2>&1 &
 CONTROL_PID="$!"
 
+CONTROL_READY=0
 for _ in $(seq 1 40); do
   if curl -fsS "${CONTROL_URL}/healthz" >/dev/null 2>&1; then
+    CONTROL_READY=1
     break
   fi
   sleep 0.25
 done
-curl -fsS "${CONTROL_URL}/healthz" >/dev/null
+if [[ "${CONTROL_READY}" -ne 1 ]]; then
+  echo "control plane did not become healthy" >&2
+  cat "${TMP_DIR}/control-plane.log" >&2
+  exit 1
+fi
 
 FORGE_CONTROL_PLANE_URL="${CONTROL_URL}" \
 FORGE_RUNNER_PATH="${ROOT_DIR}/bin/forge-build-runner" \
@@ -133,6 +143,7 @@ PY
 curl -fsS \
   -X POST \
   -H "Content-Type: application/json" \
+  -H "X-GitHub-Event: push" \
   -H "X-Hub-Signature-256: sha256=${SIGNATURE}" \
   --data-binary @"${PAYLOAD}" \
   "${CONTROL_URL}/api/v1/webhook/github" >/dev/null

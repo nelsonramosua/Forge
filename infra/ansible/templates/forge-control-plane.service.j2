@@ -16,8 +16,14 @@ ExecStart=/usr/local/bin/forge-control-plane
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/forge
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
 
 [Install]
 WantedBy=multi-user.target

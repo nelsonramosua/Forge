@@ -9,6 +9,7 @@ make test
 go test -race ./...
 go vet ./...
 ./bin/forge-build-runner --workdir /tmp --cgroup smoke -- /bin/true
+./bin/forge-build-runner --require-isolation --workdir /tmp --cgroup strict-smoke -- /bin/true
 ```
 
 Run the local end-to-end harness:
@@ -18,6 +19,14 @@ scripts/e2e-local.sh
 ```
 
 The local E2E test starts a temporary control plane and agent, creates a temporary Git repo with `forge.yaml`, sends a signed GitHub-style webhook, and waits for the deployment to become `running`.
+
+Security checks covered by unit/E2E tests:
+
+- Control-plane startup fails if required tokens, webhook secret, master key, or repository allowlist are missing.
+- GitHub webhooks require `X-Hub-Signature-256`, `X-GitHub-Event: push`, an allowed `owner/repo`, an allowed branch, and a hex commit SHA.
+- Deployments use dynamically allocated app ports from `20000-39999`.
+- `forge.yaml` parsing rejects unknown fields and accepts normal quoted YAML values.
+- Production worker builds require Linux namespace isolation instead of falling back to plain `fork()`.
 
 ## Infrastructure
 
@@ -38,9 +47,10 @@ If both profiles fail, use `scripts/oci-capacity-loop.sh` to retry periodically.
 ## OCI Post-Deploy
 
 ```sh
-curl -fsS http://CONTROL_PLANE_PUBLIC_IP:8080/healthz
+curl -fsS https://BASE_DOMAIN/healthz
 curl -fsS http://CONTROL_PLANE_PUBLIC_IP:9090/-/healthy
 curl -fsS http://CONTROL_PLANE_PUBLIC_IP:3000/api/health
+ssh ubuntu@CONTROL_PLANE_PUBLIC_IP 'curl -fsS http://127.0.0.1:8080/healthz'
 ssh ubuntu@CONTROL_PLANE_PUBLIC_IP 'curl -fsS http://127.0.0.1:2019/config/'
 ssh ubuntu@CONTROL_PLANE_PUBLIC_IP 'curl -fsS http://WORKER_PRIVATE_IP:9108/metrics'
 ```
@@ -51,3 +61,6 @@ ssh ubuntu@CONTROL_PLANE_PUBLIC_IP 'curl -fsS http://WORKER_PRIVATE_IP:9108/metr
 - Invalid build command: build task should enter `failed`.
 - Invalid health path: run task should enter `failed`.
 - Stopped worker: new deployments remain `pending` until an agent comes back online.
+- Unsigned webhook: request should return `401`.
+- Repo not in `FORGE_ALLOWED_REPOS`: request should return `403`.
+- Unsafe commit SHA such as `--help`: request should return `400`.

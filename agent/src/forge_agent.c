@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -33,6 +34,7 @@ struct agent_config {
     char metrics_socket[256];
     char advertised_address[128];
     int poll_sleep_seconds;
+    bool require_isolation;
 };
 
 struct http_response {
@@ -82,6 +84,10 @@ struct log_thread_arg {
     int fd;
 };
 
+struct process_monitor_arg {
+    pid_t pid;
+};
+
 static volatile sig_atomic_t running = 1;
 static struct metrics_state metrics = {.mu = PTHREAD_MUTEX_INITIALIZER};
 
@@ -95,6 +101,14 @@ static const char *env_or(const char *key, const char *fallback) {
     return value && value[0] ? value : fallback;
 }
 
+static bool env_bool(const char *key, bool fallback) {
+    const char *value = getenv(key);
+    if (!value || !value[0]) {
+        return fallback;
+    }
+    return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "yes") == 0 || strcasecmp(value, "on") == 0;
+}
+
 static void load_config(struct agent_config *cfg) {
     memset(cfg, 0, sizeof(*cfg));
     snprintf(cfg->control_url, sizeof(cfg->control_url), "%s", env_or("FORGE_CONTROL_PLANE_URL", "http://127.0.0.1:8080"));
@@ -102,6 +116,7 @@ static void load_config(struct agent_config *cfg) {
     snprintf(cfg->runner_path, sizeof(cfg->runner_path), "%s", env_or("FORGE_RUNNER_PATH", "./bin/forge-build-runner"));
     snprintf(cfg->metrics_socket, sizeof(cfg->metrics_socket), "%s", env_or("FORGE_METRICS_SOCKET", "/tmp/forge-agent-metrics.sock"));
     snprintf(cfg->advertised_address, sizeof(cfg->advertised_address), "%s", env_or("FORGE_AGENT_ADDRESS", ""));
+    cfg->require_isolation = env_bool("FORGE_REQUIRE_ISOLATION", false);
     cfg->poll_sleep_seconds = atoi(env_or("FORGE_AGENT_POLL_SECONDS", "2"));
     if (cfg->poll_sleep_seconds <= 0) {
         cfg->poll_sleep_seconds = 2;
@@ -805,6 +820,19 @@ static void join_path(char *out, size_t out_len, const char *a, const char *b) {
     snprintf(out, out_len, "%s/%s", a, b);
 }
 
+static bool is_commit_sha(const char *value) {
+    size_t len = strlen(value);
+    if (len != 40 && len != 64) {
+        return false;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (!isxdigit((unsigned char)value[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static int ensure_repo(const struct agent_config *cfg, const struct task *task, char *src, size_t src_len) {
     if (mkdir_p(task->workdir) < 0) {
         post_event(cfg, task->id, "error", strerror(errno));
@@ -819,10 +847,22 @@ static int ensure_repo(const struct agent_config *cfg, const struct task *task, 
         }
     }
     if (task->commit_sha[0]) {
-        char *checkout_argv[] = {"git", "-C", src, "checkout", (char *)task->commit_sha, NULL};
+        if (!is_commit_sha(task->commit_sha)) {
+            post_event(cfg, task->id, "error", "invalid commit sha");
+            return 1;
+        }
+        char *checkout_argv[] = {"git", "-C", src, "checkout", "--detach", (char *)task->commit_sha, NULL};
         int code = run_capture(cfg, task->id, checkout_argv, NULL);
         if (code != 0) {
-            return code;
+            char *fetch_argv[] = {"git", "-C", src, "fetch", "--depth=1", "origin", (char *)task->commit_sha, NULL};
+            int fetch_code = run_capture(cfg, task->id, fetch_argv, NULL);
+            if (fetch_code != 0) {
+                return fetch_code;
+            }
+            code = run_capture(cfg, task->id, checkout_argv, NULL);
+            if (code != 0) {
+                return code;
+            }
         }
     }
     return 0;
@@ -849,22 +889,25 @@ static int run_build_task(const struct agent_config *cfg, const struct task *tas
         char cgroup[128];
         snprintf(cgroup, sizeof(cgroup), "build-%ld-%d", task->id, i);
         post_event(cfg, task->id, "info", task->build_commands[i]);
-        char *argv[] = {
-            (char *)cfg->runner_path,
-            "--workdir",
-            src,
-            "--cgroup",
-            cgroup,
-            "--memory-bytes",
-            memory,
-            "--cpu-quota",
-            cpu_quota,
-            "--",
-            "/bin/sh",
-            "-lc",
-            task->build_commands[i],
-            NULL,
-        };
+        char *argv[18];
+        int arg = 0;
+        argv[arg++] = (char *)cfg->runner_path;
+        if (cfg->require_isolation) {
+            argv[arg++] = "--require-isolation";
+        }
+        argv[arg++] = "--workdir";
+        argv[arg++] = src;
+        argv[arg++] = "--cgroup";
+        argv[arg++] = cgroup;
+        argv[arg++] = "--memory-bytes";
+        argv[arg++] = memory;
+        argv[arg++] = "--cpu-quota";
+        argv[arg++] = cpu_quota;
+        argv[arg++] = "--";
+        argv[arg++] = "/bin/sh";
+        argv[arg++] = "-lc";
+        argv[arg++] = task->build_commands[i];
+        argv[arg] = NULL;
         code = run_capture(cfg, task->id, argv, NULL);
         if (code != 0) {
             complete_task(cfg, task->id, "failed", "build command failed", 0, 0);
@@ -929,6 +972,63 @@ static void *log_stream_thread(void *arg) {
     close(thread_arg->fd);
     free(thread_arg);
     return NULL;
+}
+
+static void sleep_millis(long ms) {
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    while (nanosleep(&ts, &ts) < 0 && errno == EINTR) {
+    }
+}
+
+static void decrement_running_processes(void) {
+    pthread_mutex_lock(&metrics.mu);
+    if (metrics.running_processes > 0) {
+        metrics.running_processes--;
+    }
+    pthread_mutex_unlock(&metrics.mu);
+}
+
+static void *process_monitor_thread(void *arg) {
+    struct process_monitor_arg *monitor = (struct process_monitor_arg *)arg;
+    int status = 0;
+    while (waitpid(monitor->pid, &status, 0) < 0 && errno == EINTR) {
+    }
+    decrement_running_processes();
+    free(monitor);
+    return NULL;
+}
+
+static void monitor_process_exit(pid_t pid) {
+    struct process_monitor_arg *monitor = calloc(1, sizeof(*monitor));
+    if (!monitor) {
+        return;
+    }
+    monitor->pid = pid;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, process_monitor_thread, monitor) == 0) {
+        pthread_detach(thread);
+        return;
+    }
+    free(monitor);
+}
+
+static void terminate_process_group(pid_t pid) {
+    kill(-pid, SIGTERM);
+    int status = 0;
+    for (int i = 0; i < 50; i++) {
+        pid_t waited = waitpid(pid, &status, WNOHANG);
+        if (waited == pid || (waited < 0 && errno == ECHILD)) {
+            decrement_running_processes();
+            return;
+        }
+        sleep_millis(100);
+    }
+    kill(-pid, SIGKILL);
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+    decrement_running_processes();
 }
 
 static int duration_seconds(const char *value, int fallback) {
@@ -1035,10 +1135,11 @@ static int run_app_task(const struct agent_config *cfg, const struct task *task)
         sleep((unsigned int)interval);
         if (health_check_once(task->port, task->health_path)) {
             complete_task(cfg, task->id, "succeeded", "health checks passed", pid, task->port);
+            monitor_process_exit(pid);
             return 0;
         }
     }
-    kill(pid, SIGTERM);
+    terminate_process_group(pid);
     complete_task(cfg, task->id, "failed", "health checks failed", pid, task->port);
     return 1;
 }
@@ -1236,6 +1337,10 @@ int main(void) {
 
     struct agent_config cfg;
     load_config(&cfg);
+    if (!cfg.token[0]) {
+        fprintf(stderr, "forge-agent: FORGE_AGENT_TOKEN is required\n");
+        return 1;
+    }
     refresh_metrics();
 
     pthread_t metrics_thread;

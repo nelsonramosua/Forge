@@ -119,14 +119,6 @@ resource "aws_security_group" "control_plane" {
   }
 
   ingress {
-    description = "Control-plane API from admin network"
-    from_port   = 8080
-    to_port     = 8080
-    protocol    = "tcp"
-    cidr_blocks = [var.admin_cidr]
-  }
-
-  ingress {
     description = "Control-plane API from Forge VPC"
     from_port   = 8080
     to_port     = 8080
@@ -194,8 +186,8 @@ resource "aws_security_group" "worker" {
 
   ingress {
     description     = "Application ports from Caddy/control plane"
-    from_port       = 1024
-    to_port         = 65535
+    from_port       = 20000
+    to_port         = 39999
     protocol        = "tcp"
     security_groups = [aws_security_group.control_plane.id]
   }
@@ -234,6 +226,12 @@ resource "aws_instance" "control_plane" {
     encrypted   = true
   }
 
+  metadata_options {
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+    instance_metadata_tags      = "disabled"
+  }
+
   tags = merge(local.common_tags, {
     Name = "forge-control-plane"
     Role = "control-plane"
@@ -252,6 +250,12 @@ resource "aws_instance" "worker" {
     volume_size = var.root_volume_size_gb
     volume_type = "gp3"
     encrypted   = true
+  }
+
+  metadata_options {
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+    instance_metadata_tags      = "disabled"
   }
 
   tags = merge(local.common_tags, {

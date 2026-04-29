@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
 type Caddy struct {
 	adminURL string
 	client   *http.Client
+	mu       sync.Mutex
 }
 
 func NewCaddy(adminURL string) *Caddy {
@@ -32,6 +34,8 @@ func (c *Caddy) EnsureRoute(ctx context.Context, appName string, host string, di
 	if !c.Enabled() {
 		return nil
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	cfg, err := c.fetchConfig(ctx)
 	if err != nil {
 		return err
@@ -45,7 +49,7 @@ func (c *Caddy) EnsureRoute(ctx context.Context, appName string, host string, di
 		}
 		filtered = append(filtered, route)
 	}
-	filtered = append(filtered, map[string]interface{}{
+	appRoute := map[string]interface{}{
 		"@id": routeID,
 		"match": []interface{}{
 			map[string]interface{}{"host": []interface{}{host}},
@@ -59,7 +63,8 @@ func (c *Caddy) EnsureRoute(ctx context.Context, appName string, host string, di
 			},
 		},
 		"terminal": true,
-	})
+	}
+	filtered = append([]interface{}{appRoute}, filtered...)
 	setRoutes(cfg, filtered)
 	return c.putConfig(ctx, cfg)
 }
@@ -68,6 +73,8 @@ func (c *Caddy) DeleteRoute(ctx context.Context, appName string) error {
 	if !c.Enabled() {
 		return nil
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	cfg, err := c.fetchConfig(ctx)
 	if err != nil {
 		return err

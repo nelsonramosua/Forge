@@ -72,6 +72,11 @@ BASE_DOMAIN      A  CONTROL_PLANE_PUBLIC_IP
 *.BASE_DOMAIN    A  CONTROL_PLANE_PUBLIC_IP
 ```
 
+`admin_cidr` must be your own narrow IPv4 CIDR, typically `YOUR_PUBLIC_IP/32`.
+Terraform rejects `0.0.0.0/0`. The control-plane API port `8080` is only opened
+inside the VCN; use public HTTPS on `443` or SSH into the control-plane VM for
+local checks.
+
 ## 2.1 Common OCI Free Tier Failures
 
 `NAT gateway limit per VCN reached`:
@@ -160,6 +165,20 @@ Edit the vault:
 ansible-vault edit infra/ansible/group_vars/all/vault.yml
 ```
 
+Configure the GitHub repositories Forge may deploy in a local, ignored
+`infra/ansible/group_vars/all/main.local.yml`:
+
+```yaml
+forge_allowed_repos:
+  - YOUR_GITHUB_USER/forge-e2e-smoke
+
+forge_allowed_branches:
+  - main
+```
+
+The control plane intentionally refuses to start without secrets and at least
+one allowed repository.
+
 ## 4. Ansible
 
 Run Ansible through the generated inventory. The worker is reached via SSH ProxyJump through the control-plane VM.
@@ -174,7 +193,7 @@ ansible-playbook -i infra/ansible/inventory.ini infra/ansible/playbook.yml --ask
 From your machine:
 
 ```sh
-curl -fsS http://CONTROL_PLANE_PUBLIC_IP:8080/healthz
+curl -fsS https://BASE_DOMAIN/healthz
 curl -fsS http://CONTROL_PLANE_PUBLIC_IP:9090/-/healthy
 curl -fsS http://CONTROL_PLANE_PUBLIC_IP:3000/api/health
 ```
@@ -182,6 +201,7 @@ curl -fsS http://CONTROL_PLANE_PUBLIC_IP:3000/api/health
 From the control-plane VM:
 
 ```sh
+curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:2019/config/
 curl -fsS http://127.0.0.1:8080/metrics
 curl -fsS http://WORKER_PRIVATE_IP:9108/metrics
@@ -206,5 +226,5 @@ Create a public test repository with `examples/forge.yaml`. Configure GitHub web
 Watch events:
 
 ```sh
-curl -N https://BASE_DOMAIN/api/v1/events
+curl -N -H "Authorization: Bearer ADMIN_TOKEN" https://BASE_DOMAIN/api/v1/events
 ```

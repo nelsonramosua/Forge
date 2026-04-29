@@ -1,1 +1,11 @@
 ansible_python_interpreter: /usr/bin/python3
+
+# Put deployment-specific values in an ignored file such as
+# infra/ansible/group_vars/all/main.local.yml.
+#
+# Example:
+# forge_allowed_repos:
+#   - YOUR_GITHUB_USER/YOUR_REPO
+#
+# forge_allowed_branches:
+#   - main

@@ -14,7 +14,10 @@ import (
 )
 
 func main() {
-	cfg := config.FromEnv()
+	cfg, err := config.FromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		log.Fatal(err)

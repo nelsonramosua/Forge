@@ -11,7 +11,7 @@
 1. List recent deployments:
    `curl -H "Authorization: Bearer $FORGE_ADMIN_TOKEN" http://CONTROL_PLANE:8080/api/v1/deployments`
 2. Watch live events:
-   `curl -N http://CONTROL_PLANE:8080/api/v1/events`
+   `curl -N -H "Authorization: Bearer $FORGE_ADMIN_TOKEN" http://CONTROL_PLANE:8080/api/v1/events`
 3. Check worker logs:
    `journalctl -u forge-agent -n 300 --no-pager`
 4. Verify the app's `forge.yaml` has valid build commands, run command, port, health path, and resource limits.

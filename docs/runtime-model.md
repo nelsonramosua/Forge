@@ -6,7 +6,7 @@ Forge separates platform dependencies from application dependencies.
 
 Workers install a small baseline toolchain with Ansible:
 
-- `git`, `make`, `gcc`, and `sqlite3` for Forge itself.
+- `git`, `make`, and `gcc` for Forge itself. The control plane embeds a pure-Go SQLite driver; `sqlite3` is installed by Ansible only as an operational/debugging CLI.
 - `python3`, `python3-venv`, and `python3-pip` for Python demo/runtime support.
 - Go tooling while Forge binaries are built directly on the host.
 
@@ -22,9 +22,20 @@ run:
   command: . .venv/bin/activate && uvicorn app:app --host 0.0.0.0 --port $PORT
 ```
 
+`forge.yaml` is parsed with `gopkg.in/yaml.v3` and unknown fields are rejected,
+so configuration mistakes fail before any build command runs.
+
 Do not add every application package to the Forge Ansible playbook. The playbook
 should install runtime managers and safe baseline tools, not each app's
 libraries.
+
+The worker service runs as the unprivileged `forge` user. Build and run commands
+still execute shell defined by the application repository, so only repositories
+listed in `FORGE_ALLOWED_REPOS` should be allowed to trigger deployments.
+The systemd unit also denies access to common instance metadata addresses, so
+application commands should not be able to read cloud metadata from the worker.
+Production workers set `FORGE_REQUIRE_ISOLATION=true`, which makes build tasks
+fail closed if the build runner cannot create Linux namespaces.
 
 ## Ports
 

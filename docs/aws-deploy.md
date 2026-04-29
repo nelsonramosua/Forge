@@ -93,6 +93,10 @@ Find your public IP:
 curl ifconfig.me
 ```
 
+`admin_cidr` must not be `0.0.0.0/0`. Terraform rejects that value. The public
+control-plane API port `8080` is not opened; use HTTPS on `443` or SSH into the
+control-plane VM for local checks.
+
 ## 5. Apply AWS Terraform
 
 ```sh
@@ -107,9 +111,14 @@ Terraform creates:
 
 - VPC, public subnet, internet gateway, route table.
 - Security group for the control plane.
-- Control-plane API port `8080` is reachable from your `admin_cidr` and from
-  the Forge VPC so workers can register over private IP.
+- Control-plane API port `8080` is reachable only from inside the Forge VPC.
+  Use Caddy over HTTPS for public webhooks and SSH into the control plane for
+  local admin/metrics checks.
 - Security group for the worker; worker inbound is only from the control-plane security group.
+- Worker instances do not receive an IAM instance profile, and EC2 metadata is
+  locked to IMDSv2. In the Free Tier topology the worker still has a public IP
+  for outbound package/app dependency downloads without a paid NAT gateway; its
+  security group does not allow public inbound traffic.
 - EC2 key pair.
 - `forge-control-plane` EC2 instance.
 - `forge-worker-1` EC2 instance.
@@ -179,6 +188,9 @@ not proxied:
 
 Forge already uses Caddy on the control-plane VM to serve public HTTPS on port
 `443` and to reverse-proxy the control-plane API on `127.0.0.1:8080`.
+Application subdomains use Caddy On-Demand TLS with an internal Forge allow
+check, so the first HTTPS request to a new app hostname can take a few seconds
+while Caddy obtains the certificate.
 
 Use these URLs:
 
@@ -237,8 +249,8 @@ ansible-playbook -i infra/ansible/inventory.ini infra/ansible/playbook.yml \
 
 ```sh
 CONTROL_IP=$(terraform -chdir=infra/terraform/aws output -raw control_plane_public_ip)
-curl -fsS http://$CONTROL_IP:8080/healthz
-curl -fsS http://$CONTROL_IP:8080/metrics
+curl -fsS https://$BASE_DOMAIN/healthz
+ssh -i ~/.ssh/forge_aws ubuntu@$CONTROL_IP 'curl -fsS http://127.0.0.1:8080/metrics'
 ```
 
 If you already have a Route 53 hosted zone and accept the cost:
@@ -272,6 +284,18 @@ openssl rand -hex 32      # vault_forge_github_webhook_secret
 openssl rand -base64 24   # vault_grafana_admin_password
 ```
 
+Configure the repositories Forge may deploy. For local deploy values that should not be committed, create `infra/ansible/group_vars/all/main.local.yml`:
+
+```yaml
+forge_allowed_repos:
+  - YOUR_GITHUB_USER/forge-e2e-smoke
+
+forge_allowed_branches:
+  - main
+```
+
+The control plane fails closed if the token/key variables or the repository allowlist are missing. This is intentional: unsigned or unknown webhooks should never trigger builds.
+
 ## 8. Run Ansible
 
 ```sh
@@ -291,7 +315,6 @@ From your machine:
 CONTROL_IP=$(terraform -chdir=infra/terraform/aws output -raw control_plane_public_ip)
 WORKER_PRIVATE_IP=$(terraform -chdir=infra/terraform/aws output -raw worker_private_ip)
 
-curl -fsS http://$CONTROL_IP:8080/healthz
 curl -fsS http://$CONTROL_IP:9090/-/healthy
 curl -fsS http://$CONTROL_IP:3000/api/health
 ```
@@ -309,6 +332,7 @@ From the control plane:
 
 ```sh
 ssh -i ~/.ssh/forge_aws ubuntu@$CONTROL_IP
+curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:2019/config/
 curl -fsS http://127.0.0.1:8080/metrics
 curl -fsS http://$WORKER_PRIVATE_IP:9108/metrics
@@ -414,13 +438,15 @@ In the GitHub repository, create a webhook:
 - Events: just `push`
 - Active: enabled
 
-GitHub sends a `ping` delivery when the webhook is created. Forge may deploy the
-current default branch from that ping; that is fine for this smoke test.
+GitHub sends a `ping` delivery when the webhook is created. The Forge control
+plane answers that ping without deploying; the first real deployment comes from
+a `push` event on an allowed branch.
 
 Watch live Forge events in one terminal:
 
 ```sh
-curl -N "https://$BASE_DOMAIN/api/v1/events"
+ADMIN_TOKEN="$(ansible-vault view infra/ansible/group_vars/all/vault.yml | awk -F': ' '/vault_forge_admin_token/ {gsub(/\"/, \"\", $2); print $2}')"
+curl -N -H "Authorization: Bearer $ADMIN_TOKEN" "https://$BASE_DOMAIN/api/v1/events"
 ```
 
 Trigger a deployment in the app repository:

@@ -69,6 +69,13 @@ func TestStoreDeploymentAndTaskLifecycle(t *testing.T) {
 	if claimed == nil || claimed.ID != task.ID || claimed.Status != "in_progress" {
 		t.Fatalf("unexpected claimed task: %+v", claimed)
 	}
+	active, err := st.ActiveTaskCountsByAgent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active["worker-1"] != 1 {
+		t.Fatalf("expected one active task for worker-1, got %+v", active)
+	}
 	if err := st.CompleteTask(ctx, task.ID, "succeeded"); err != nil {
 		t.Fatal(err)
 	}

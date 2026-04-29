@@ -31,6 +31,41 @@
         state: present
         update_cache: true
 
+    - name: Create swapfile when no swap is active
+      ansible.builtin.command:
+        cmd: fallocate -l 1G /swapfile
+        creates: /swapfile
+      register: forge_swapfile
+      when: ansible_swaptotal_mb | int == 0
+
+    - name: Secure swapfile permissions
+      ansible.builtin.file:
+        path: /swapfile
+        owner: root
+        group: root
+        mode: "0600"
+      when: ansible_swaptotal_mb | int == 0
+
+    - name: Format swapfile
+      ansible.builtin.command:
+        cmd: mkswap /swapfile
+      when:
+        - ansible_swaptotal_mb | int == 0
+        - forge_swapfile.changed
+
+    - name: Enable swapfile
+      ansible.builtin.command:
+        cmd: swapon /swapfile
+      changed_when: true
+      when: ansible_swaptotal_mb | int == 0
+
+    - name: Persist swapfile
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        line: /swapfile none swap sw 0 0
+        state: present
+      when: ansible_swaptotal_mb | int == 0
+
     - name: Create apt keyring directory
       ansible.builtin.file:
         path: /etc/apt/keyrings
@@ -134,6 +169,23 @@
       changed_when: true
       notify: Restart forge-control-plane
 
+    - name: Validate control-plane required configuration
+      ansible.builtin.assert:
+        that:
+          - vault_forge_master_key is defined
+          - vault_forge_master_key | length > 0
+          - vault_forge_agent_token is defined
+          - vault_forge_agent_token | length > 0
+          - vault_forge_admin_token is defined
+          - vault_forge_admin_token | length > 0
+          - vault_forge_github_webhook_secret is defined
+          - vault_forge_github_webhook_secret | length > 0
+          - forge_allowed_repos is defined
+          - forge_allowed_repos | length > 0
+        fail_msg: "Forge control-plane secrets and forge_allowed_repos must be configured before deployment."
+        success_msg: "Forge control-plane required configuration is present."
+      no_log: true
+
     - name: Install control-plane environment file
       ansible.builtin.template:
         src: control-plane.env.j2
@@ -157,7 +209,9 @@
         owner: root
         group: root
         mode: "0644"
-      notify: Reload caddy
+      notify:
+        - Reload caddy
+        - Restart forge-control-plane
 
     - name: Install Prometheus config
       ansible.builtin.template:
@@ -229,6 +283,16 @@
     - name: Flush service restarts before Grafana admin reset
       ansible.builtin.meta: flush_handlers
 
+    - name: Wait for Forge control-plane health
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8080/healthz
+        method: GET
+        status_code: 200
+      register: forge_health
+      retries: 30
+      delay: 2
+      until: forge_health.status == 200
+
     - name: Wait for Grafana API
       ansible.builtin.uri:
         url: http://127.0.0.1:3000/api/health
@@ -255,16 +319,16 @@
       when: grafana_password_reset.rc != 0
 
   handlers:
+    - name: Reload caddy
+      ansible.builtin.systemd:
+        name: caddy
+        state: reloaded
+
     - name: Restart forge-control-plane
       ansible.builtin.systemd:
         name: forge-control-plane
         state: restarted
         daemon_reload: true
-
-    - name: Reload caddy
-      ansible.builtin.systemd:
-        name: caddy
-        state: reloaded
 
     - name: Restart prometheus
       ansible.builtin.systemd:
@@ -307,6 +371,41 @@
           - tar
         state: present
         update_cache: true
+
+    - name: Create swapfile when no swap is active
+      ansible.builtin.command:
+        cmd: fallocate -l 1G /swapfile
+        creates: /swapfile
+      register: forge_swapfile
+      when: ansible_swaptotal_mb | int == 0
+
+    - name: Secure swapfile permissions
+      ansible.builtin.file:
+        path: /swapfile
+        owner: root
+        group: root
+        mode: "0600"
+      when: ansible_swaptotal_mb | int == 0
+
+    - name: Format swapfile
+      ansible.builtin.command:
+        cmd: mkswap /swapfile
+      when:
+        - ansible_swaptotal_mb | int == 0
+        - forge_swapfile.changed
+
+    - name: Enable swapfile
+      ansible.builtin.command:
+        cmd: swapon /swapfile
+      changed_when: true
+      when: ansible_swaptotal_mb | int == 0
+
+    - name: Persist swapfile
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        line: /swapfile none swap sw 0 0
+        state: present
+      when: ansible_swaptotal_mb | int == 0
 
     - name: Create forge user
       ansible.builtin.user:

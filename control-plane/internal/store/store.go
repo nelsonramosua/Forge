@@ -1,22 +1,19 @@
 package store
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
-	"strings"
-	"sync"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 type Store struct {
-	path string
-	mu   sync.Mutex
+	db *sql.DB
 }
 
 type Agent struct {
@@ -79,18 +76,46 @@ type Secret struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+type scanner interface {
+	Scan(dest ...interface{}) error
+}
+
 func Open(path string) (*Store, error) {
-	if _, err := exec.LookPath("sqlite3"); err != nil {
-		return nil, fmt.Errorf("sqlite3 executable is required: %w", err)
-	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, err
 	}
-	s := &Store{path: path}
-	if err := s.exec(context.Background(), schemaSQL); err != nil {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", sqliteDSN(absPath))
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(4)
+
+	s := &Store{db: db}
+	if _, err := s.db.ExecContext(context.Background(), schemaSQL); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+func sqliteDSN(path string) string {
+	u := url.URL{Scheme: "file", Path: path}
+	q := u.Query()
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "foreign_keys(1)")
+	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "synchronous(NORMAL)")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func (s *Store) Close() error {
+	return s.db.Close()
 }
 
 func (s *Store) UpsertAgent(ctx context.Context, agent Agent) error {
@@ -98,9 +123,9 @@ func (s *Store) UpsertAgent(ctx context.Context, agent Agent) error {
 	if agent.Status == "" {
 		agent.Status = "online"
 	}
-	sql := fmt.Sprintf(`
+	_, err := s.db.ExecContext(ctx, `
 INSERT INTO agents(id, hostname, address, cpu_capacity, memory_capacity, cpu_used, memory_used, status, last_seen, created_at, updated_at)
-VALUES(%s, %s, %s, %s, %d, %s, %d, %s, %s, %s, %s)
+VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   hostname=excluded.hostname,
   address=excluded.address,
@@ -109,36 +134,37 @@ ON CONFLICT(id) DO UPDATE SET
   status=excluded.status,
   last_seen=excluded.last_seen,
   updated_at=excluded.updated_at;
-`, q(agent.ID), q(agent.Hostname), q(agent.Address), floatSQL(agent.CPUCapacity), agent.MemoryCapacity, floatSQL(agent.CPUUsed), agent.MemoryUsed, q(agent.Status), q(now), q(now), q(now))
-	return s.exec(ctx, sql)
+`, agent.ID, agent.Hostname, agent.Address, agent.CPUCapacity, agent.MemoryCapacity, agent.CPUUsed, agent.MemoryUsed, agent.Status, now, now, now)
+	return err
 }
 
 func (s *Store) UpdateAgentHeartbeat(ctx context.Context, id string, address string, cpuUsed float64, memoryUsed int64) error {
 	now := timestamp(time.Now())
-	sql := fmt.Sprintf(`
-UPDATE agents SET address=%s, cpu_used=%s, memory_used=%d, status='online', last_seen=%s, updated_at=%s WHERE id=%s;
-`, q(address), floatSQL(cpuUsed), memoryUsed, q(now), q(now), q(id))
-	return s.exec(ctx, sql)
+	_, err := s.db.ExecContext(ctx, `
+UPDATE agents SET address=?, cpu_used=?, memory_used=?, status='online', last_seen=?, updated_at=? WHERE id=?;
+`, address, cpuUsed, memoryUsed, now, now, id)
+	return err
 }
 
 func (s *Store) OnlineAgents(ctx context.Context, cutoff time.Time) ([]Agent, error) {
-	rows, err := s.query(ctx, fmt.Sprintf(`SELECT * FROM agents WHERE status='online' AND last_seen >= %s ORDER BY last_seen DESC;`, q(timestamp(cutoff))))
+	rows, err := s.db.QueryContext(ctx, `SELECT * FROM agents WHERE status='online' AND last_seen >= ? ORDER BY last_seen DESC;`, timestamp(cutoff))
 	if err != nil {
 		return nil, err
 	}
-	return agentsFromRows(rows), nil
+	defer rows.Close()
+	return scanAgents(rows)
 }
 
 func (s *Store) GetAgent(ctx context.Context, id string) (Agent, bool, error) {
-	rows, err := s.query(ctx, fmt.Sprintf(`SELECT * FROM agents WHERE id=%s LIMIT 1;`, q(id)))
+	row := s.db.QueryRowContext(ctx, `SELECT * FROM agents WHERE id=? LIMIT 1;`, id)
+	agent, err := scanAgent(row)
+	if err == sql.ErrNoRows {
+		return Agent{}, false, nil
+	}
 	if err != nil {
 		return Agent{}, false, err
 	}
-	agents := agentsFromRows(rows)
-	if len(agents) == 0 {
-		return Agent{}, false, nil
-	}
-	return agents[0], true, nil
+	return agent, true, nil
 }
 
 func (s *Store) CreateDeployment(ctx context.Context, d Deployment) (Deployment, error) {
@@ -146,90 +172,111 @@ func (s *Store) CreateDeployment(ctx context.Context, d Deployment) (Deployment,
 	if d.Status == "" {
 		d.Status = "pending"
 	}
-	sql := fmt.Sprintf(`
+	result, err := s.db.ExecContext(ctx, `
 INSERT INTO deployments(app_name, repo_url, commit_sha, branch, status, config_json, assigned_agent_id, host, target_port, created_at, updated_at)
-VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %d, %s, %s);
-SELECT last_insert_rowid() AS id;
-`, q(d.AppName), q(d.RepoURL), q(d.CommitSHA), q(d.Branch), q(d.Status), q(d.ConfigJSON), q(d.AssignedAgentID), q(d.Host), d.TargetPort, q(now), q(now))
-	rows, err := s.query(ctx, sql)
+VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+`, d.AppName, d.RepoURL, d.CommitSHA, d.Branch, d.Status, d.ConfigJSON, d.AssignedAgentID, d.Host, d.TargetPort, now, now)
 	if err != nil {
 		return Deployment{}, err
 	}
-	if len(rows) == 0 {
-		return Deployment{}, fmt.Errorf("deployment insert did not return an id")
+	d.ID, err = result.LastInsertId()
+	if err != nil {
+		return Deployment{}, err
 	}
-	d.ID = int64From(rows[0], "id")
 	d.CreatedAt = parseTime(now)
 	d.UpdatedAt = d.CreatedAt
 	return d, nil
 }
 
 func (s *Store) ListDeploymentsByStatus(ctx context.Context, status string) ([]Deployment, error) {
-	rows, err := s.query(ctx, fmt.Sprintf(`SELECT * FROM deployments WHERE status=%s ORDER BY created_at ASC;`, q(status)))
+	rows, err := s.db.QueryContext(ctx, `SELECT * FROM deployments WHERE status=? ORDER BY created_at ASC;`, status)
 	if err != nil {
 		return nil, err
 	}
-	return deploymentsFromRows(rows), nil
+	defer rows.Close()
+	return scanDeployments(rows)
 }
 
 func (s *Store) ListDeployments(ctx context.Context, limit int) ([]Deployment, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.query(ctx, fmt.Sprintf(`SELECT * FROM deployments ORDER BY created_at DESC LIMIT %d;`, limit))
+	rows, err := s.db.QueryContext(ctx, `SELECT * FROM deployments ORDER BY created_at DESC LIMIT ?;`, limit)
 	if err != nil {
 		return nil, err
 	}
-	return deploymentsFromRows(rows), nil
+	defer rows.Close()
+	return scanDeployments(rows)
 }
 
 func (s *Store) GetDeployment(ctx context.Context, id int64) (Deployment, bool, error) {
-	rows, err := s.query(ctx, fmt.Sprintf(`SELECT * FROM deployments WHERE id=%d LIMIT 1;`, id))
+	row := s.db.QueryRowContext(ctx, `SELECT * FROM deployments WHERE id=? LIMIT 1;`, id)
+	deployment, err := scanDeployment(row)
+	if err == sql.ErrNoRows {
+		return Deployment{}, false, nil
+	}
 	if err != nil {
 		return Deployment{}, false, err
 	}
-	deployments := deploymentsFromRows(rows)
-	if len(deployments) == 0 {
-		return Deployment{}, false, nil
+	return deployment, true, nil
+}
+
+func (s *Store) HasRunningDeploymentHost(ctx context.Context, host string) (bool, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM deployments WHERE host=? AND status='running' LIMIT 1;`, host).Scan(&id)
+	if err == sql.ErrNoRows {
+		return false, nil
 	}
-	return deployments[0], true, nil
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) UpdateDeploymentAssignment(ctx context.Context, id int64, agentID string, status string) error {
 	now := timestamp(time.Now())
-	return s.exec(ctx, fmt.Sprintf(`UPDATE deployments SET assigned_agent_id=%s, status=%s, updated_at=%s WHERE id=%d;`, q(agentID), q(status), q(now), id))
+	_, err := s.db.ExecContext(ctx, `UPDATE deployments SET assigned_agent_id=?, status=?, updated_at=? WHERE id=?;`, agentID, status, now, id)
+	return err
 }
 
 func (s *Store) UpdateDeploymentStatus(ctx context.Context, id int64, status string) error {
 	now := timestamp(time.Now())
-	return s.exec(ctx, fmt.Sprintf(`UPDATE deployments SET status=%s, updated_at=%s WHERE id=%d;`, q(status), q(now), id))
+	_, err := s.db.ExecContext(ctx, `UPDATE deployments SET status=?, updated_at=? WHERE id=?;`, status, now, id)
+	return err
 }
 
 func (s *Store) SetDeploymentTargetPort(ctx context.Context, id int64, port int) error {
 	now := timestamp(time.Now())
-	return s.exec(ctx, fmt.Sprintf(`UPDATE deployments SET target_port=%d, updated_at=%s WHERE id=%d;`, port, q(now), id))
+	_, err := s.db.ExecContext(ctx, `UPDATE deployments SET target_port=?, updated_at=? WHERE id=?;`, port, now, id)
+	return err
 }
 
 func (s *Store) MarkDeploymentRunning(ctx context.Context, id int64, port int) error {
 	now := timestamp(time.Now())
-	return s.exec(ctx, fmt.Sprintf(`UPDATE deployments SET status='running', target_port=%d, updated_at=%s WHERE id=%d;`, port, q(now), id))
+	_, err := s.db.ExecContext(ctx, `UPDATE deployments SET status='running', target_port=?, updated_at=? WHERE id=?;`, port, now, id)
+	return err
 }
 
 func (s *Store) UsedTargetPorts(ctx context.Context, agentID string) (map[int]bool, error) {
-	rows, err := s.query(ctx, fmt.Sprintf(`
+	rows, err := s.db.QueryContext(ctx, `
 SELECT target_port FROM deployments
-WHERE assigned_agent_id=%s
+WHERE assigned_agent_id=?
   AND target_port > 0
   AND status IN ('building', 'deploying', 'running');
-`, q(agentID)))
+`, agentID)
 	if err != nil {
 		return nil, err
 	}
-	ports := make(map[int]bool, len(rows))
-	for _, row := range rows {
-		ports[int(int64From(row, "target_port"))] = true
+	defer rows.Close()
+	ports := make(map[int]bool)
+	for rows.Next() {
+		var port int
+		if err := rows.Scan(&port); err != nil {
+			return nil, err
+		}
+		ports[port] = true
 	}
-	return ports, nil
+	return ports, rows.Err()
 }
 
 func (s *Store) CreateTask(ctx context.Context, task Task) (Task, error) {
@@ -237,35 +284,50 @@ func (s *Store) CreateTask(ctx context.Context, task Task) (Task, error) {
 	if task.Status == "" {
 		task.Status = "pending"
 	}
-	sql := fmt.Sprintf(`
+	result, err := s.db.ExecContext(ctx, `
 INSERT INTO tasks(deployment_id, agent_id, type, status, payload_json, attempts, created_at, updated_at)
-VALUES(%d, %s, %s, %s, %s, %d, %s, %s);
-SELECT last_insert_rowid() AS id;
-`, task.DeploymentID, q(task.AgentID), q(task.Type), q(task.Status), q(task.PayloadJSON), task.Attempts, q(now), q(now))
-	rows, err := s.query(ctx, sql)
+VALUES(?, ?, ?, ?, ?, ?, ?, ?);
+`, task.DeploymentID, task.AgentID, task.Type, task.Status, task.PayloadJSON, task.Attempts, now, now)
 	if err != nil {
 		return Task{}, err
 	}
-	if len(rows) == 0 {
-		return Task{}, fmt.Errorf("task insert did not return an id")
+	task.ID, err = result.LastInsertId()
+	if err != nil {
+		return Task{}, err
 	}
-	task.ID = int64From(rows[0], "id")
 	task.CreatedAt = parseTime(now)
 	task.UpdatedAt = task.CreatedAt
 	return task, nil
 }
 
 func (s *Store) ClaimNextTask(ctx context.Context, agentID string) (*Task, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	rows, err := s.queryLocked(ctx, fmt.Sprintf(`SELECT * FROM tasks WHERE agent_id=%s AND status='pending' ORDER BY created_at ASC LIMIT 1;`, q(agentID)))
-	if err != nil || len(rows) == 0 {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return nil, err
 	}
-	task := taskFromRow(rows[0])
+	defer tx.Rollback()
+
+	row := tx.QueryRowContext(ctx, `SELECT * FROM tasks WHERE agent_id=? AND status='pending' ORDER BY created_at ASC LIMIT 1;`, agentID)
+	task, err := scanTask(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	now := timestamp(time.Now())
-	if err := s.execLocked(ctx, fmt.Sprintf(`UPDATE tasks SET status='in_progress', attempts=attempts+1, updated_at=%s WHERE id=%d;`, q(now), task.ID)); err != nil {
+	result, err := tx.ExecContext(ctx, `UPDATE tasks SET status='in_progress', attempts=attempts+1, updated_at=? WHERE id=? AND status='pending';`, now, task.ID)
+	if err != nil {
+		return nil, err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if updated == 0 {
+		return nil, tx.Commit()
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	task.Status = "in_progress"
@@ -274,82 +336,96 @@ func (s *Store) ClaimNextTask(ctx context.Context, agentID string) (*Task, error
 	return &task, nil
 }
 
+func (s *Store) ActiveTaskCountsByAgent(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT agent_id, COUNT(*) AS count FROM tasks WHERE status IN ('pending', 'in_progress') GROUP BY agent_id;`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := make(map[string]int)
+	for rows.Next() {
+		var agentID string
+		var count int
+		if err := rows.Scan(&agentID, &count); err != nil {
+			return nil, err
+		}
+		counts[agentID] = count
+	}
+	return counts, rows.Err()
+}
+
 func (s *Store) CompleteTask(ctx context.Context, id int64, status string) error {
 	now := timestamp(time.Now())
-	return s.exec(ctx, fmt.Sprintf(`UPDATE tasks SET status=%s, completed_at=%s, updated_at=%s WHERE id=%d;`, q(status), q(now), q(now), id))
+	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET status=?, completed_at=?, updated_at=? WHERE id=?;`, status, now, now, id)
+	return err
 }
 
 func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
-	rows, err := s.query(ctx, fmt.Sprintf(`SELECT * FROM tasks WHERE id=%d LIMIT 1;`, id))
+	row := s.db.QueryRowContext(ctx, `SELECT * FROM tasks WHERE id=? LIMIT 1;`, id)
+	task, err := scanTask(row)
+	if err == sql.ErrNoRows {
+		return Task{}, false, nil
+	}
 	if err != nil {
 		return Task{}, false, err
 	}
-	if len(rows) == 0 {
-		return Task{}, false, nil
-	}
-	return taskFromRow(rows[0]), true, nil
+	return task, true, nil
 }
 
 func (s *Store) AddTaskEvent(ctx context.Context, event TaskEvent) (TaskEvent, error) {
 	now := timestamp(time.Now())
-	sql := fmt.Sprintf(`
+	result, err := s.db.ExecContext(ctx, `
 INSERT INTO task_events(task_id, deployment_id, level, message, created_at)
-VALUES(%d, %d, %s, %s, %s);
-SELECT last_insert_rowid() AS id;
-`, event.TaskID, event.DeploymentID, q(event.Level), q(event.Message), q(now))
-	rows, err := s.query(ctx, sql)
+VALUES(?, ?, ?, ?, ?);
+`, event.TaskID, event.DeploymentID, event.Level, event.Message, now)
 	if err != nil {
 		return TaskEvent{}, err
 	}
-	if len(rows) > 0 {
-		event.ID = int64From(rows[0], "id")
-	}
+	event.ID, _ = result.LastInsertId()
 	event.CreatedAt = parseTime(now)
 	return event, nil
 }
 
 func (s *Store) SetSecret(ctx context.Context, secret Secret) error {
 	now := timestamp(time.Now())
-	sql := fmt.Sprintf(`
+	_, err := s.db.ExecContext(ctx, `
 INSERT INTO secrets(app_name, key, nonce, ciphertext, created_at, updated_at)
-VALUES(%s, %s, %s, %s, %s, %s)
+VALUES(?, ?, ?, ?, ?, ?)
 ON CONFLICT(app_name, key) DO UPDATE SET
   nonce=excluded.nonce,
   ciphertext=excluded.ciphertext,
   updated_at=excluded.updated_at;
-`, q(secret.AppName), q(secret.Key), q(secret.Nonce), q(secret.Ciphertext), q(now), q(now))
-	return s.exec(ctx, sql)
+`, secret.AppName, secret.Key, secret.Nonce, secret.Ciphertext, now, now)
+	return err
 }
 
 func (s *Store) GetSecret(ctx context.Context, appName string, key string) (Secret, bool, error) {
-	rows, err := s.query(ctx, fmt.Sprintf(`SELECT * FROM secrets WHERE app_name=%s AND key=%s LIMIT 1;`, q(appName), q(key)))
+	row := s.db.QueryRowContext(ctx, `SELECT app_name, key, nonce, ciphertext, created_at, updated_at FROM secrets WHERE app_name=? AND key=? LIMIT 1;`, appName, key)
+	secret, err := scanSecret(row)
+	if err == sql.ErrNoRows {
+		return Secret{}, false, nil
+	}
 	if err != nil {
 		return Secret{}, false, err
 	}
-	if len(rows) == 0 {
-		return Secret{}, false, nil
-	}
-	row := rows[0]
-	return Secret{
-		AppName:    stringFrom(row, "app_name"),
-		Key:        stringFrom(row, "key"),
-		Nonce:      stringFrom(row, "nonce"),
-		Ciphertext: stringFrom(row, "ciphertext"),
-		CreatedAt:  timeFrom(row, "created_at"),
-		UpdatedAt:  timeFrom(row, "updated_at"),
-	}, true, nil
+	return secret, true, nil
 }
 
 func (s *Store) ListSecretKeys(ctx context.Context, appName string) ([]string, error) {
-	rows, err := s.query(ctx, fmt.Sprintf(`SELECT key FROM secrets WHERE app_name=%s ORDER BY key;`, q(appName)))
+	rows, err := s.db.QueryContext(ctx, `SELECT key FROM secrets WHERE app_name=? ORDER BY key;`, appName)
 	if err != nil {
 		return nil, err
 	}
-	keys := make([]string, 0, len(rows))
-	for _, row := range rows {
-		keys = append(keys, stringFrom(row, "key"))
+	defer rows.Close()
+	var keys []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
 	}
-	return keys, nil
+	return keys, rows.Err()
 }
 
 func (s *Store) DeploymentCounts(ctx context.Context) (map[string]int64, error) {
@@ -364,172 +440,95 @@ func (s *Store) counts(ctx context.Context, table string) (map[string]int64, err
 	if table != "deployments" && table != "tasks" {
 		return nil, fmt.Errorf("invalid table %q", table)
 	}
-	rows, err := s.query(ctx, fmt.Sprintf(`SELECT status, COUNT(*) AS count FROM %s GROUP BY status;`, table))
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`SELECT status, COUNT(*) AS count FROM %s GROUP BY status;`, table))
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[string]int64, len(rows))
-	for _, row := range rows {
-		out[stringFrom(row, "status")] = int64From(row, "count")
+	defer rows.Close()
+	out := make(map[string]int64)
+	for rows.Next() {
+		var status string
+		var count int64
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		out[status] = count
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
-func (s *Store) exec(ctx context.Context, sql string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.execLocked(ctx, sql)
+func scanAgents(rows *sql.Rows) ([]Agent, error) {
+	var agents []Agent
+	for rows.Next() {
+		agent, err := scanAgent(rows)
+		if err != nil {
+			return nil, err
+		}
+		agents = append(agents, agent)
+	}
+	return agents, rows.Err()
 }
 
-func (s *Store) query(ctx context.Context, sql string) ([]map[string]interface{}, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.queryLocked(ctx, sql)
+func scanAgent(row scanner) (Agent, error) {
+	var agent Agent
+	var lastSeen, createdAt, updatedAt string
+	err := row.Scan(&agent.ID, &agent.Hostname, &agent.Address, &agent.CPUCapacity, &agent.MemoryCapacity, &agent.CPUUsed, &agent.MemoryUsed, &agent.Status, &lastSeen, &createdAt, &updatedAt)
+	if err != nil {
+		return Agent{}, err
+	}
+	agent.LastSeen = parseTime(lastSeen)
+	agent.CreatedAt = parseTime(createdAt)
+	agent.UpdatedAt = parseTime(updatedAt)
+	return agent, nil
 }
 
-func (s *Store) execLocked(ctx context.Context, sql string) error {
-	cmd := exec.CommandContext(ctx, "sqlite3", s.path)
-	cmd.Stdin = strings.NewReader(sql)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("sqlite exec failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+func scanDeployments(rows *sql.Rows) ([]Deployment, error) {
+	var deployments []Deployment
+	for rows.Next() {
+		deployment, err := scanDeployment(rows)
+		if err != nil {
+			return nil, err
+		}
+		deployments = append(deployments, deployment)
 	}
-	return nil
+	return deployments, rows.Err()
 }
 
-func (s *Store) queryLocked(ctx context.Context, sql string) ([]map[string]interface{}, error) {
-	cmd := exec.CommandContext(ctx, "sqlite3", "-json", s.path, sql)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("sqlite query failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+func scanDeployment(row scanner) (Deployment, error) {
+	var deployment Deployment
+	var createdAt, updatedAt string
+	err := row.Scan(&deployment.ID, &deployment.AppName, &deployment.RepoURL, &deployment.CommitSHA, &deployment.Branch, &deployment.Status, &deployment.ConfigJSON, &deployment.AssignedAgentID, &deployment.Host, &deployment.TargetPort, &createdAt, &updatedAt)
+	if err != nil {
+		return Deployment{}, err
 	}
-	if strings.TrimSpace(stdout.String()) == "" {
-		return nil, nil
-	}
-	decoder := json.NewDecoder(&stdout)
-	decoder.UseNumber()
-	var rows []map[string]interface{}
-	if err := decoder.Decode(&rows); err != nil {
-		return nil, fmt.Errorf("decode sqlite json: %w", err)
-	}
-	return rows, nil
+	deployment.CreatedAt = parseTime(createdAt)
+	deployment.UpdatedAt = parseTime(updatedAt)
+	return deployment, nil
 }
 
-func agentsFromRows(rows []map[string]interface{}) []Agent {
-	agents := make([]Agent, 0, len(rows))
-	for _, row := range rows {
-		agents = append(agents, Agent{
-			ID:             stringFrom(row, "id"),
-			Hostname:       stringFrom(row, "hostname"),
-			Address:        stringFrom(row, "address"),
-			CPUCapacity:    floatFrom(row, "cpu_capacity"),
-			MemoryCapacity: int64From(row, "memory_capacity"),
-			CPUUsed:        floatFrom(row, "cpu_used"),
-			MemoryUsed:     int64From(row, "memory_used"),
-			Status:         stringFrom(row, "status"),
-			LastSeen:       timeFrom(row, "last_seen"),
-			CreatedAt:      timeFrom(row, "created_at"),
-			UpdatedAt:      timeFrom(row, "updated_at"),
-		})
+func scanTask(row scanner) (Task, error) {
+	var task Task
+	var createdAt, updatedAt, completedAt string
+	err := row.Scan(&task.ID, &task.DeploymentID, &task.AgentID, &task.Type, &task.Status, &task.PayloadJSON, &task.Attempts, &createdAt, &updatedAt, &completedAt)
+	if err != nil {
+		return Task{}, err
 	}
-	return agents
+	task.CreatedAt = parseTime(createdAt)
+	task.UpdatedAt = parseTime(updatedAt)
+	task.CompletedAt = parseTime(completedAt)
+	return task, nil
 }
 
-func deploymentsFromRows(rows []map[string]interface{}) []Deployment {
-	deployments := make([]Deployment, 0, len(rows))
-	for _, row := range rows {
-		deployments = append(deployments, Deployment{
-			ID:              int64From(row, "id"),
-			AppName:         stringFrom(row, "app_name"),
-			RepoURL:         stringFrom(row, "repo_url"),
-			CommitSHA:       stringFrom(row, "commit_sha"),
-			Branch:          stringFrom(row, "branch"),
-			Status:          stringFrom(row, "status"),
-			ConfigJSON:      stringFrom(row, "config_json"),
-			AssignedAgentID: stringFrom(row, "assigned_agent_id"),
-			Host:            stringFrom(row, "host"),
-			TargetPort:      int(int64From(row, "target_port")),
-			CreatedAt:       timeFrom(row, "created_at"),
-			UpdatedAt:       timeFrom(row, "updated_at"),
-		})
+func scanSecret(row scanner) (Secret, error) {
+	var secret Secret
+	var createdAt, updatedAt string
+	err := row.Scan(&secret.AppName, &secret.Key, &secret.Nonce, &secret.Ciphertext, &createdAt, &updatedAt)
+	if err != nil {
+		return Secret{}, err
 	}
-	return deployments
-}
-
-func taskFromRow(row map[string]interface{}) Task {
-	return Task{
-		ID:           int64From(row, "id"),
-		DeploymentID: int64From(row, "deployment_id"),
-		AgentID:      stringFrom(row, "agent_id"),
-		Type:         stringFrom(row, "type"),
-		Status:       stringFrom(row, "status"),
-		PayloadJSON:  stringFrom(row, "payload_json"),
-		Attempts:     int(int64From(row, "attempts")),
-		CreatedAt:    timeFrom(row, "created_at"),
-		UpdatedAt:    timeFrom(row, "updated_at"),
-		CompletedAt:  timeFrom(row, "completed_at"),
-	}
-}
-
-func stringFrom(row map[string]interface{}, key string) string {
-	value, ok := row[key]
-	if !ok || value == nil {
-		return ""
-	}
-	switch typed := value.(type) {
-	case string:
-		return typed
-	case json.Number:
-		return typed.String()
-	default:
-		return fmt.Sprint(typed)
-	}
-}
-
-func int64From(row map[string]interface{}, key string) int64 {
-	value, ok := row[key]
-	if !ok || value == nil {
-		return 0
-	}
-	switch typed := value.(type) {
-	case json.Number:
-		n, _ := typed.Int64()
-		return n
-	case float64:
-		return int64(typed)
-	case string:
-		n, _ := strconv.ParseInt(typed, 10, 64)
-		return n
-	default:
-		return 0
-	}
-}
-
-func floatFrom(row map[string]interface{}, key string) float64 {
-	value, ok := row[key]
-	if !ok || value == nil {
-		return 0
-	}
-	switch typed := value.(type) {
-	case json.Number:
-		f, _ := typed.Float64()
-		return f
-	case float64:
-		return typed
-	case string:
-		f, _ := strconv.ParseFloat(typed, 64)
-		return f
-	default:
-		return 0
-	}
-}
-
-func timeFrom(row map[string]interface{}, key string) time.Time {
-	return parseTime(stringFrom(row, key))
+	secret.CreatedAt = parseTime(createdAt)
+	secret.UpdatedAt = parseTime(updatedAt)
+	return secret, nil
 }
 
 func parseTime(value string) time.Time {
@@ -544,19 +543,7 @@ func timestamp(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
-func q(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
-}
-
-func floatSQL(value float64) string {
-	return strconv.FormatFloat(value, 'f', -1, 64)
-}
-
 const schemaSQL = `
-PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
-PRAGMA foreign_keys=ON;
-
 CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
   hostname TEXT NOT NULL,

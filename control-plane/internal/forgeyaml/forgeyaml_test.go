@@ -35,3 +35,44 @@ env:
 		t.Fatalf("unexpected lists: %+v", cfg)
 	}
 }
+
+func TestParseForgeYAMLRejectsUnknownFields(t *testing.T) {
+	input := []byte(`name: myapp
+runtime: python3.11
+surprise: true
+build:
+  commands:
+    - echo ok
+run:
+  command: python app.py
+  port: 8000
+resources:
+  memory: 128M
+  cpu: 0.2
+`)
+	if _, err := Parse(input); err == nil {
+		t.Fatal("expected unknown field to be rejected")
+	}
+}
+
+func TestParseForgeYAMLSupportsQuotedColons(t *testing.T) {
+	input := []byte(`name: myapp
+runtime: python3.11
+build:
+  commands:
+    - "python -c 'print(\"a:b\")'"
+run:
+  command: "python -m http.server --bind 0.0.0.0 $PORT"
+  port: 8000
+resources:
+  memory: "128M"
+  cpu: 0.2
+`)
+	cfg, err := Parse(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Build.Commands[0] != `python -c 'print("a:b")'` {
+		t.Fatalf("unexpected command %q", cfg.Build.Commands[0])
+	}
+}
