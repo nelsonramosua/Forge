@@ -27,14 +27,15 @@ on:
 
 concurrency:
   group: deploy-production
-  cancel-in-progress: false   # never cancel a deploy in progress
+  cancel-in-progress: false   # Do not cancel a deploy that is already running.
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   deploy:
-    name: Deploy → ${{ inputs.target || 'control-plane' }}
+    name: Deploy to ${{ inputs.target || 'control-plane' }}
     runs-on: ubuntu-latest
     if: >-
       ${{
@@ -46,8 +47,8 @@ jobs:
         )
       }}
 
-    # Environment with protection rules — configure at:
-    # Settings → Environments → production → Required reviewers
+    # Configure protection rules at:
+    # Settings > Environments > production > Required reviewers
     environment: production
 
     steps:
@@ -59,6 +60,52 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Validate AWS deploy role
+        run: |
+          if [ -z "${AWS_DEPLOY_ROLE_ARN}" ]; then
+            echo "::error::Set the AWS_DEPLOY_ROLE_ARN repository secret to an IAM role GitHub Actions can assume for temporary SSH ingress."
+            exit 1
+          fi
+        env:
+          AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
+
+      - name: Allow runner SSH to control plane
+        id: ssh_ingress
+        run: |
+          runner_ip="$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]')"
+          runner_cidr="${runner_ip}/32"
+          sg_id="$(aws ec2 describe-instances \
+            --filters "Name=ip-address,Values=${{ secrets.FORGE_CONTROL_PLANE_IP }}" \
+            --query 'Reservations[].Instances[].SecurityGroups[].GroupId | [0]' \
+            --output text)"
+
+          if [ -z "${sg_id}" ] || [ "${sg_id}" = "None" ]; then
+            echo "::error::Could not find the control-plane security group from FORGE_CONTROL_PLANE_IP."
+            exit 1
+          fi
+
+          echo "runner_cidr=${runner_cidr}" >> "$GITHUB_OUTPUT"
+          echo "sg_id=${sg_id}" >> "$GITHUB_OUTPUT"
+
+          permission="$(printf '[{"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges":[{"CidrIp":"%s","Description":"Forge GitHub Actions deploy %s"}]}]' "${runner_cidr}" "${GITHUB_RUN_ID}")"
+          if output="$(aws ec2 authorize-security-group-ingress \
+              --group-id "${sg_id}" \
+              --ip-permissions "${permission}" 2>&1)"; then
+            echo "added=true" >> "$GITHUB_OUTPUT"
+            echo "Opened temporary SSH ingress for ${runner_cidr} on ${sg_id}."
+          elif grep -q "InvalidPermission.Duplicate" <<<"${output}"; then
+            echo "added=false" >> "$GITHUB_OUTPUT"
+            echo "Temporary SSH ingress for ${runner_cidr} already exists on ${sg_id}."
+          else
+            echo "${output}" >&2
+            exit 1
+          fi
 
       - name: Install Ansible
         run: |
@@ -72,7 +119,15 @@ jobs:
           echo "${{ secrets.FORGE_SSH_PRIVATE_KEY }}" > ~/.ssh/forge_deploy
           chmod 600 ~/.ssh/forge_deploy
           control_host="${{ secrets.FORGE_CONTROL_PLANE_IP }}"
-          if ! ssh-keyscan -T 10 -H "${control_host}" >> ~/.ssh/known_hosts 2>/dev/null; then
+          reachable=0
+          for _ in $(seq 1 6); do
+            if ssh-keyscan -T 10 -H "${control_host}" >> ~/.ssh/known_hosts 2>/dev/null; then
+              reachable=1
+              break
+            fi
+            sleep 5
+          done
+          if [ "${reachable}" -ne 1 ]; then
             echo "::error::Cannot reach control-plane SSH at FORGE_CONTROL_PLANE_IP:22. Check the secret value, instance state, and the AWS admin_cidr/security group. GitHub-hosted runners need SSH ingress or deploy must run from a reachable self-hosted runner/VPN."
             exit 1
           fi
@@ -102,7 +157,7 @@ jobs:
           echo "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > ~/.vault_pass
           chmod 600 ~/.vault_pass
 
-      - name: Write Ansible Vault file (group_vars)
+      - name: Write Ansible Vault group variables
         run: |
           # The real vault.yml is generated from GitHub Secrets to avoid
           # storing encrypted files in the repo that depend on a rotated password.
@@ -149,7 +204,7 @@ jobs:
           # Prevent Ansible output from appearing in GitHub logs in plaintext
           ANSIBLE_DISPLAY_SKIPPED_HOSTS: "false"
 
-      - name: Smoke check — control plane health
+      - name: Smoke check - control plane health
         if: ${{ !inputs.ansible_check && (inputs.target == 'control-plane' || inputs.target == 'all' || inputs.target == '') }}
         run: |
           echo "Wait 10s for service to stabilize..."
@@ -164,6 +219,17 @@ jobs:
             exit 1
           fi
           echo "Control plane OK."
+
+      - name: Revoke runner SSH ingress
+        if: always() && steps.ssh_ingress.outputs.added == 'true'
+        run: |
+          if ! aws ec2 revoke-security-group-ingress \
+              --group-id "${{ steps.ssh_ingress.outputs.sg_id }}" \
+              --protocol tcp \
+              --port 22 \
+              --cidr "${{ steps.ssh_ingress.outputs.runner_cidr }}"; then
+            echo "::warning::Failed to revoke temporary SSH ingress for ${{ steps.ssh_ingress.outputs.runner_cidr }}."
+          fi
 
       - name: Cleanup credentials
         if: always()
