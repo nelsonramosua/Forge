@@ -101,7 +101,7 @@ func (c *Caddy) fetchConfig(ctx context.Context) (map[string]interface{}, error)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return baseConfig(), nil
 	}
@@ -132,7 +132,7 @@ func (c *Caddy) putConfig(ctx context.Context, cfg map[string]interface{}) error
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("caddy POST /load returned %s", resp.Status)
 	}

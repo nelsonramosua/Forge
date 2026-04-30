@@ -22,7 +22,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	vt, err := vault.New(cfg.MasterKey)
 	if err != nil {
 		log.Fatal(err)

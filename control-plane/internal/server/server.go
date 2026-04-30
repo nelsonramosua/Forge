@@ -45,7 +45,7 @@ func New(cfg config.Config, st *store.Store, vt *vault.Vault) *Server {
 }
 
 func (s *Server) Run(ctx context.Context) error {
-	if err := os.MkdirAll(s.cfg.WorkDir, 0755); err != nil {
+	if err := os.MkdirAll(s.cfg.WorkDir, 0750); err != nil {
 		return err
 	}
 	go s.syncRunningRoutesWithRetry(ctx)
@@ -668,19 +668,19 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	fmt.Fprintln(w, "# HELP forge_deployments_total Deployments by state.")
-	fmt.Fprintln(w, "# TYPE forge_deployments_total gauge")
+	_ = fmt.Fprintln(w, "# HELP forge_deployments_total Deployments by state.")
+	_ = fmt.Fprintln(w, "# TYPE forge_deployments_total gauge")
 	for status, count := range deploymentCounts {
-		fmt.Fprintf(w, "forge_deployments_total{status=%q} %d\n", status, count)
+		_, _ = fmt.Fprintf(w, "forge_deployments_total{status=%q} %d\n", status, count)
 	}
-	fmt.Fprintln(w, "# HELP forge_tasks_total Tasks by state.")
-	fmt.Fprintln(w, "# TYPE forge_tasks_total gauge")
+	_ = fmt.Fprintln(w, "# HELP forge_tasks_total Tasks by state.")
+	_ = fmt.Fprintln(w, "# TYPE forge_tasks_total gauge")
 	for status, count := range taskCounts {
-		fmt.Fprintf(w, "forge_tasks_total{status=%q} %d\n", status, count)
+		_, _ = fmt.Fprintf(w, "forge_tasks_total{status=%q} %d\n", status, count)
 	}
-	fmt.Fprintln(w, "# HELP forge_agents_online Online worker agents.")
-	fmt.Fprintln(w, "# TYPE forge_agents_online gauge")
-	fmt.Fprintf(w, "forge_agents_online %d\n", len(agents))
+	_ = fmt.Fprintln(w, "# HELP forge_agents_online Online worker agents.")
+	_ = fmt.Fprintln(w, "# TYPE forge_agents_online gauge")
+	_, _ = fmt.Fprintf(w, "forge_agents_online %d\n", len(agents))
 }
 
 func (s *Server) schedulerLoop(ctx context.Context) {
@@ -999,8 +999,8 @@ func chooseDeploymentPort(deploymentID int64, used map[int]bool, start int, end 
 
 func (s *Server) cloneAndParseForgeYAML(ctx context.Context, repoURL string, branch string, commit string) (forgeyaml.Config, error) {
 	target := filepath.Join(s.cfg.WorkDir, "repos", strconv.FormatInt(time.Now().UnixNano(), 10))
-	defer os.RemoveAll(target)
-	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+	defer func() { _ = os.RemoveAll(target) }()
+	if err := os.MkdirAll(filepath.Dir(target), 0750); err != nil {
 		return forgeyaml.Config{}, err
 	}
 	cloneCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -1263,7 +1263,7 @@ func bearerToken(r *http.Request) string {
 }
 
 func readJSON(r *http.Request, target interface{}) error {
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 	decoder.DisallowUnknownFields()
 	return decoder.Decode(target)

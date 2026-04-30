@@ -24,7 +24,13 @@ func main() {
 		_, _ = w.Write(body)
 	})
 	log.Printf("forge exporter listening on %s and scraping %s", addr, socket)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+	}
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -35,7 +41,7 @@ func scrapeUnixMetrics(ctx context.Context, socket string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 	if _, err := conn.Write([]byte("GET /metrics HTTP/1.1\r\nHost: forge-agent\r\nConnection: close\r\n\r\n")); err != nil {
 		return nil, err

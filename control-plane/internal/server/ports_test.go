@@ -124,7 +124,7 @@ func TestTLSAskAllowsBaseDomainAndRunningDeploymentHost(t *testing.T) {
 		{"*.nforge.space", http.StatusForbidden},
 	}
 	for _, tt := range tests {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/tls/ask?domain="+tt.domain, nil)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/tls/ask?domain="+tt.domain, nil)
 		res := httptest.NewRecorder()
 		handler.ServeHTTP(res, req)
 		if res.Code != tt.code {

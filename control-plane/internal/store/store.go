@@ -81,7 +81,7 @@ type scanner interface {
 }
 
 func Open(path string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 		return nil, err
 	}
 	absPath, err := filepath.Abs(path)
@@ -151,7 +151,7 @@ func (s *Store) OnlineAgents(ctx context.Context, cutoff time.Time) ([]Agent, er
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanAgents(rows)
 }
 
@@ -193,7 +193,7 @@ func (s *Store) ListDeploymentsByStatus(ctx context.Context, status string) ([]D
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanDeployments(rows)
 }
 
@@ -205,7 +205,7 @@ func (s *Store) ListDeployments(ctx context.Context, limit int) ([]Deployment, e
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanDeployments(rows)
 }
 
@@ -279,7 +279,7 @@ WHERE assigned_agent_id=?
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	ports := make(map[int]bool)
 	for rows.Next() {
 		var port int
@@ -353,7 +353,7 @@ func (s *Store) ActiveTaskCountsByAgent(ctx context.Context) (map[string]int, er
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	counts := make(map[string]int)
 	for rows.Next() {
 		var agentID string
@@ -438,7 +438,7 @@ func (s *Store) ListSecretKeys(ctx context.Context, appName string) ([]string, e
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var keys []string
 	for rows.Next() {
 		var key string
@@ -460,7 +460,7 @@ func (s *Store) ListTaskEventsByDeployment(ctx context.Context, deploymentID int
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var events []TaskEvent
 	for rows.Next() {
 		var event TaskEvent
@@ -490,7 +490,7 @@ func (s *Store) counts(ctx context.Context, table string) (map[string]int64, err
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := make(map[string]int64)
 	for rows.Next() {
 		var status string

@@ -199,7 +199,9 @@ jobs:
                   owner: context.repo.owner,
                   repo:  context.repo.repo,
                   issue_number: issue.number,
-                  body: `Drift resolved — \`terraform plan\` found no changes in ${new Date().toISOString().slice(0,10)}.\n\n[See run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
+                  body: `Drift resolved — \`terraform plan\` found no changes on ` +
+                        `${new Date().toISOString().slice(0,10)}.\n\n[View run](` +
+                        `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
                 });
                 await github.rest.issues.update({
                   owner: context.repo.owner,
