@@ -64,7 +64,8 @@ jobs:
       - name: Validate AWS deploy role
         run: |
           if [ -z "${AWS_DEPLOY_ROLE_ARN}" ]; then
-            echo "::error::Set the AWS_DEPLOY_ROLE_ARN repository secret to an IAM role GitHub Actions can assume for temporary SSH ingress."
+            echo "::error::Set the AWS_DEPLOY_ROLE_ARN repository secret."
+            echo "::error::It must be an IAM role GitHub Actions can assume for temporary SSH ingress."
             exit 1
           fi
         env:
@@ -77,16 +78,32 @@ jobs:
 
       - name: Allow runner SSH to control plane
         id: ssh_ingress
+        env:
+          CONTROL_PLANE_IP: ${{ secrets.FORGE_CONTROL_PLANE_IP }}
+          CONTROL_PLANE_PRIVATE_IP: ${{ secrets.FORGE_CONTROL_PLANE_PRIVATE_IP }}
+          CONTROL_PLANE_SECURITY_GROUP_ID: ${{ secrets.FORGE_CONTROL_PLANE_SECURITY_GROUP_ID }}
         run: |
           runner_ip="$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]')"
           runner_cidr="${runner_ip}/32"
-          sg_id="$(aws ec2 describe-instances \
-            --filters "Name=ip-address,Values=${{ secrets.FORGE_CONTROL_PLANE_IP }}" \
-            --query 'Reservations[].Instances[].SecurityGroups[].GroupId | [0]' \
-            --output text)"
+          sg_id="${CONTROL_PLANE_SECURITY_GROUP_ID}"
+
+          if [ -z "${sg_id}" ]; then
+            sg_id="$(aws ec2 describe-instances \
+              --filters "Name=ip-address,Values=${CONTROL_PLANE_IP}" \
+              --query 'Reservations[].Instances[].SecurityGroups[].GroupId | [0]' \
+              --output text)"
+          fi
+
+          if { [ -z "${sg_id}" ] || [ "${sg_id}" = "None" ]; } && [ -n "${CONTROL_PLANE_PRIVATE_IP}" ]; then
+            sg_id="$(aws ec2 describe-instances \
+              --filters "Name=private-ip-address,Values=${CONTROL_PLANE_PRIVATE_IP}" \
+              --query 'Reservations[].Instances[].SecurityGroups[].GroupId | [0]' \
+              --output text)"
+          fi
 
           if [ -z "${sg_id}" ] || [ "${sg_id}" = "None" ]; then
-            echo "::error::Could not find the control-plane security group from FORGE_CONTROL_PLANE_IP."
+            echo "::error::Could not find the control-plane security group."
+            echo "::error::Set FORGE_CONTROL_PLANE_SECURITY_GROUP_ID or check AWS_REGION and control-plane IP secrets."
             exit 1
           fi
 
