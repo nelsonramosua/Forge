@@ -49,6 +49,9 @@ jobs:
   ci-gate:
     name: CI gate
     if: ${{ !inputs.skip_ci }}
+    permissions:
+      contents: read
+      security-events: write
     uses: ./.github/workflows/ci.yml
 
   # ── 2. Deploy ───────────────────────────────────────────────────────────────

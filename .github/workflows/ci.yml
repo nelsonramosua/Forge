@@ -230,7 +230,7 @@ jobs:
 
       - name: Validate all example forge.yaml files
         run: |
-          cat > .ci-validate-forgeyaml.go <<'EOF'
+          cat > control-plane/ci_validate_forgeyaml.go <<'EOF'
           package main
 
           import (
@@ -272,7 +272,7 @@ jobs:
             }
           }
           EOF
-          go run ./.ci-validate-forgeyaml.go
+          go run ./control-plane/ci_validate_forgeyaml.go
 
   # ── 7. E2E smoke (Linux only, no network) ────────────────────────────────────
   e2e:
@@ -303,7 +303,7 @@ jobs:
   ci-ok:
     name: CI passed
     runs-on: ubuntu-latest
-    needs: [go, c, security, iac, shell, e2e]
+    needs: [go, c, security, iac, shell, forgeyaml, e2e]
     if: always()
     steps:
       - name: Check all required jobs

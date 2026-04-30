@@ -395,6 +395,12 @@ static bool task_json_string(const json_value_t *object, const char *key, char *
     return json_value_as_string(json_object_get(object, key), out, out_len);
 }
 
+static void task_json_optional_string(const json_value_t *object, const char *key, char *out, size_t out_len) {
+    if (!task_json_string(object, key, out, out_len) && out_len > 0) {
+        out[0] = '\0';
+    }
+}
+
 static long task_json_long_default(const json_value_t *object, const char *key, long fallback) {
     long value = fallback;
     if (json_value_as_long(json_object_get(object, key), &value)) {
@@ -494,12 +500,13 @@ static bool parse_task(const char *json, struct task *task) {
     task->id = task_json_long_default(root, "id", 0);
     task->deployment_id = task_json_long_default(root, "deployment_id", 0);
     task->port = (int)task_json_long_default(root, "port", 0);
-    task->memory_bytes = task_json_long_default(root, "memory_bytes", 0);
-    task->cpu = task_json_double_default(root, "cpu", 0.0);
+    const json_value_t *resources = json_object_get(root, "resources");
+    task->memory_bytes = task_json_long_default(resources, "memory_bytes", task_json_long_default(root, "memory_bytes", 0));
+    task->cpu = task_json_double_default(resources, "cpu", task_json_double_default(root, "cpu", 0.0));
     task->health_retries = (int)task_json_long_default(root, "retries", 3);
     bool ok = true;
     ok &= task_json_string(root, "type", task->type, sizeof(task->type));
-    ok &= task_json_string(root, "action", task->action, sizeof(task->action));
+    task_json_optional_string(root, "action", task->action, sizeof(task->action));
     ok &= task_json_string(root, "app_name", task->app_name, sizeof(task->app_name));
     ok &= task_json_string(root, "repo_url", task->repo_url, sizeof(task->repo_url));
     ok &= task_json_string(root, "commit_sha", task->commit_sha, sizeof(task->commit_sha));
