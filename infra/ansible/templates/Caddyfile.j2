@@ -16,6 +16,10 @@
 	reverse_proxy 127.0.0.1:8080
 }
 
+http:// {
+	redir https://{host}{uri} permanent
+}
+
 https:// {
 	tls {
 		on_demand

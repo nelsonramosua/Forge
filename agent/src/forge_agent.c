@@ -55,6 +55,7 @@ struct task {
     long id;
     long deployment_id;
     char type[32];
+    char action[32];
     char app_name[128];
     char repo_url[512];
     char commit_sha[128];
@@ -91,6 +92,10 @@ struct log_thread_arg {
 struct process_monitor_arg {
     pid_t pid;
 };
+
+static int kill_cgroup_processes(const char *cgroup_path);
+static int run_stop_task(const struct agent_config *cfg, const struct task *task);
+static void sleep_millis(long ms);
 
 static volatile sig_atomic_t running = 1;
 static struct metrics_state metrics = {.mu = PTHREAD_MUTEX_INITIALIZER};
@@ -494,6 +499,7 @@ static bool parse_task(const char *json, struct task *task) {
     task->health_retries = (int)task_json_long_default(root, "retries", 3);
     bool ok = true;
     ok &= task_json_string(root, "type", task->type, sizeof(task->type));
+    ok &= task_json_string(root, "action", task->action, sizeof(task->action));
     ok &= task_json_string(root, "app_name", task->app_name, sizeof(task->app_name));
     ok &= task_json_string(root, "repo_url", task->repo_url, sizeof(task->repo_url));
     ok &= task_json_string(root, "commit_sha", task->commit_sha, sizeof(task->commit_sha));
@@ -658,7 +664,7 @@ static int run_capture(const struct agent_config *cfg, long task_id, char *const
             long deadline_ms = (long)timeout_seconds * 1000L;
             if (elapsed_ms >= deadline_ms) {
                 timed_out = true;
-                kill(pid, SIGKILL);
+                kill(pid, SIGTERM);
             }
         }
 
@@ -703,6 +709,24 @@ static int run_capture(const struct agent_config *cfg, long task_id, char *const
     }
     close(pipefd[0]);
     int status = 0;
+    if (timed_out) {
+        struct timespec grace_start;
+        clock_gettime(CLOCK_MONOTONIC, &grace_start);
+        while (true) {
+            pid_t waited = waitpid(pid, &status, WNOHANG);
+            if (waited == pid || (waited < 0 && errno == ECHILD)) {
+                break;
+            }
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            long elapsed_ms = (now.tv_sec - grace_start.tv_sec) * 1000L + (now.tv_nsec - grace_start.tv_nsec) / 1000000L;
+            if (elapsed_ms >= 5000) {
+                kill(pid, SIGKILL);
+                break;
+            }
+            sleep_millis(100);
+        }
+    }
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
     }
     if (timed_out) {
@@ -1033,6 +1057,8 @@ static int run_app_task(const struct agent_config *cfg, const struct task *task)
             close(pipefd[0]);
             free(thread_arg);
         }
+    } else {
+        close(pipefd[0]);
     }
 
     pthread_mutex_lock(&metrics.mu);
@@ -1117,7 +1143,9 @@ static void handle_task(const struct agent_config *cfg, const char *json) {
         fprintf(stderr, "forge-agent: could not parse task: %s\n", json);
         return;
     }
-    if (strcmp(task.type, "build") == 0) {
+    if (strcmp(task.action, "stop") == 0) {
+        run_stop_task(cfg, &task);
+    } else if (strcmp(task.type, "build") == 0) {
         run_build_task(cfg, &task);
     } else if (strcmp(task.type, "run") == 0) {
         run_app_task(cfg, &task);
@@ -1125,6 +1153,49 @@ static void handle_task(const struct agent_config *cfg, const char *json) {
         complete_task(cfg, task.id, "failed", "unknown task type", 0, 0);
     }
     task_free(&task);
+}
+
+static int kill_cgroup_processes(const char *cgroup_path) {
+    char file[1024];
+    snprintf(file, sizeof(file), "%s/cgroup.kill", cgroup_path);
+    FILE *fp = fopen(file, "w");
+    if (fp) {
+        fputs("1", fp);
+        if (fclose(fp) == 0) {
+            return 0;
+        }
+    }
+
+    snprintf(file, sizeof(file), "%s/cgroup.procs", cgroup_path);
+    fp = fopen(file, "r");
+    if (!fp) {
+        return 0;
+    }
+    pid_t pids[128];
+    size_t count = 0;
+    while (count < sizeof(pids) / sizeof(pids[0]) && fscanf(fp, "%d", &pids[count]) == 1) {
+        count++;
+    }
+    fclose(fp);
+    for (size_t i = 0; i < count; i++) {
+        kill(pids[i], SIGTERM);
+    }
+    sleep_millis(5000);
+    for (size_t i = 0; i < count; i++) {
+        kill(pids[i], SIGKILL);
+    }
+    return 0;
+}
+
+static int run_stop_task(const struct agent_config *cfg, const struct task *task) {
+    char cgroup_path[512];
+    snprintf(cgroup_path, sizeof(cgroup_path), "/sys/fs/cgroup/forge/run-%ld", task->deployment_id);
+    if (kill_cgroup_processes(cgroup_path) != 0) {
+        complete_task(cfg, task->id, "failed", "stop failed", 0, 0);
+        return 1;
+    }
+    complete_task(cfg, task->id, "succeeded", "deployment stopped", 0, 0);
+    return 0;
 }
 
 static void *metrics_server_thread(void *arg) {

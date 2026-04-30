@@ -292,10 +292,10 @@ resource "aws_instance" "control_plane" {
 resource "aws_instance" "worker" {
   ami                         = local.worker_arch == "arm64" ? data.aws_ami.ubuntu_jammy_arm64.id : data.aws_ami.ubuntu_jammy_x86.id
   instance_type               = var.worker_instance_type
-  subnet_id                   = aws_subnet.private.id
+  subnet_id                   = var.create_nat_gateway ? aws_subnet.private.id : aws_subnet.public.id
   vpc_security_group_ids      = [aws_security_group.worker.id]
   key_name                    = aws_key_pair.forge.key_name
-  associate_public_ip_address = false
+  associate_public_ip_address = var.create_nat_gateway ? false : true
 
   root_block_device {
     volume_size = var.root_volume_size_gb

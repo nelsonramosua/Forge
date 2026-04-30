@@ -130,6 +130,7 @@ func (s *Server) routes(ctx context.Context) http.Handler {
 	mux.HandleFunc("/api/v1/tasks/", s.handleTaskSubroutes)
 	mux.HandleFunc("/api/v1/apps/", s.handleAppSubroutes)
 	mux.HandleFunc("/api/v1/deployments", s.handleDeployments)
+	mux.HandleFunc("/api/v1/deployments/", s.handleDeploymentSubroutes)
 	return mux
 }
 
@@ -167,6 +168,33 @@ func (s *Server) handleDeployments(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, views)
+}
+
+func (s *Server) handleDeploymentSubroutes(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeAdmin(w, r) {
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/deployments/")
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 2 || parts[1] != "logs" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	deploymentID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid deployment id"})
+		return
+	}
+	logs, err := s.store.ListTaskEventsByDeployment(r.Context(), deploymentID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"deployment_id": deploymentID, "events": logs})
 }
 
 func (s *Server) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
@@ -519,7 +547,11 @@ func (s *Server) handleTaskComplete(w http.ResponseWriter, r *http.Request, task
 	}
 
 	if req.Status == "failed" {
-		_ = s.store.UpdateDeploymentStatus(r.Context(), deployment.ID, "failed")
+		if taskAction(task.PayloadJSON) == "stop" {
+			_ = s.store.UpdateDeploymentStatus(r.Context(), deployment.ID, "running")
+		} else {
+			_ = s.store.UpdateDeploymentStatus(r.Context(), deployment.ID, "failed")
+		}
 		if previous, ok, err := s.store.LatestRunningDeploymentByHostExcluding(r.Context(), deployment.Host, deployment.ID); err == nil && ok {
 			if rollbackErr := s.rollbackDeploymentRoute(r.Context(), previous); rollbackErr != nil {
 				log.Printf("rollback failed for deployment %d: %v", deployment.ID, rollbackErr)
@@ -538,6 +570,15 @@ func (s *Server) handleTaskComplete(w http.ResponseWriter, r *http.Request, task
 			return
 		}
 	case "run":
+		if taskAction(task.PayloadJSON) == "stop" {
+			if err := s.store.UpdateDeploymentStatus(r.Context(), deployment.ID, "stopped"); err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			s.hub.publish("deployment", map[string]interface{}{"id": deployment.ID, "status": "stopped"})
+			writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
+			return
+		}
 		if err := s.finishRunTask(r.Context(), deployment, task.AgentID, req.Port); err != nil {
 			_ = s.store.UpdateDeploymentStatus(r.Context(), deployment.ID, "failed")
 			writeError(w, http.StatusInternalServerError, err)
@@ -567,11 +608,19 @@ func (s *Server) handleAppSubroutes(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"app": appName, "keys": keys})
 		return
 	}
-	if len(parts) != 3 || r.Method != http.MethodPut {
+	if len(parts) != 3 || (r.Method != http.MethodPut && r.Method != http.MethodDelete) {
 		methodNotAllowed(w)
 		return
 	}
 	key := parts[2]
+	if r.Method == http.MethodDelete {
+		if err := s.store.DeleteSecret(r.Context(), appName, key); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+		return
+	}
 	var req secretPutRequest
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -804,6 +853,11 @@ func (s *Server) finishRunTask(ctx context.Context, deployment store.Deployment,
 		}
 		return err
 	}
+	if hasPrevious {
+		if stopErr := s.enqueueStopTask(ctx, previous); stopErr != nil {
+			log.Printf("stop enqueue failed for deployment %d: %v", previous.ID, stopErr)
+		}
+	}
 	s.hub.publish("deployment", map[string]interface{}{
 		"id":          deployment.ID,
 		"status":      "running",
@@ -811,6 +865,34 @@ func (s *Server) finishRunTask(ctx context.Context, deployment store.Deployment,
 		"target_port": port,
 	})
 	return nil
+}
+
+func (s *Server) enqueueStopTask(ctx context.Context, deployment store.Deployment) error {
+	if deployment.AssignedAgentID == "" {
+		return fmt.Errorf("deployment %d has no assigned agent", deployment.ID)
+	}
+	var appConfig forgeyaml.Config
+	if err := json.Unmarshal([]byte(deployment.ConfigJSON), &appConfig); err != nil {
+		return err
+	}
+	payload, err := s.taskPayload(ctx, deployment, appConfig)
+	if err != nil {
+		return err
+	}
+	payload["action"] = "stop"
+	payload["run_command"] = ""
+	payload["build_commands"] = []string{}
+	payloadJSON, _ := json.Marshal(payload)
+	if _, err := s.store.CreateTask(ctx, store.Task{
+		DeploymentID: deployment.ID,
+		AgentID:      deployment.AssignedAgentID,
+		Type:         "run",
+		Status:       "pending",
+		PayloadJSON:  string(payloadJSON),
+	}); err != nil {
+		return err
+	}
+	return s.store.UpdateDeploymentStatus(ctx, deployment.ID, "stopping")
 }
 
 func (s *Server) rollbackDeploymentRoute(ctx context.Context, deployment store.Deployment) error {
@@ -875,6 +957,18 @@ func (s *Server) taskPayload(ctx context.Context, deployment store.Deployment, a
 		},
 		"env": env,
 	}, nil
+}
+
+func taskAction(payloadJSON string) string {
+	if payloadJSON == "" {
+		return ""
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return ""
+	}
+	action, _ := payload["action"].(string)
+	return action
 }
 
 func deploymentPort(deployment store.Deployment, appConfig forgeyaml.Config) int {
@@ -1061,16 +1155,18 @@ func (s *Server) repoCloneURL(payload githubPushPayload) (string, error) {
 			repoURL = strings.TrimSpace(payload.Repository.URL)
 		}
 		if repoURL == "" {
-			return "", fmt.Errorf("repository clone_url is required for local repositories")
-		}
-		if strings.HasPrefix(repoURL, "http://") || strings.HasPrefix(repoURL, "https://") {
-			return repoURL, nil
+			return "", fmt.Errorf("local repository reference rejected")
 		}
 		if strings.HasPrefix(repoURL, "file://") {
 			repoURL = strings.TrimPrefix(repoURL, "file://")
 		}
 		if !filepath.IsAbs(repoURL) {
-			return "", fmt.Errorf("local repo clone_url must be an absolute path or http(s) URL")
+			return "", fmt.Errorf("local repository reference rejected")
+		}
+		repoURL = filepath.Clean(repoURL)
+		allowedBase := filepath.Clean(os.TempDir())
+		if repoURL != allowedBase && !strings.HasPrefix(repoURL, allowedBase+string(os.PathSeparator)) {
+			return "", fmt.Errorf("local repository reference rejected")
 		}
 		return repoURL, nil
 	}

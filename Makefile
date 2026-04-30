@@ -1,6 +1,6 @@
 GO ?= go
 CC ?= gcc
-CFLAGS ?= -std=c11 -Wall -Wextra -O2
+CFLAGS ?= -std=c11 -Wall -Wextra -Werror -O2
 PREFIX ?= /usr/local
 
 .PHONY: all build test clean run-control-plane run-agent install

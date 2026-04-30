@@ -450,6 +450,30 @@ func (s *Store) ListSecretKeys(ctx context.Context, appName string) ([]string, e
 	return keys, rows.Err()
 }
 
+func (s *Store) DeleteSecret(ctx context.Context, appName string, key string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM secrets WHERE app_name=? AND key=?;`, appName, key)
+	return err
+}
+
+func (s *Store) ListTaskEventsByDeployment(ctx context.Context, deploymentID int64) ([]TaskEvent, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, deployment_id, level, message, created_at FROM task_events WHERE deployment_id=? ORDER BY created_at ASC, id ASC;`, deploymentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []TaskEvent
+	for rows.Next() {
+		var event TaskEvent
+		var createdAt string
+		if err := rows.Scan(&event.ID, &event.TaskID, &event.DeploymentID, &event.Level, &event.Message, &createdAt); err != nil {
+			return nil, err
+		}
+		event.CreatedAt = parseTime(createdAt)
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
 func (s *Store) DeploymentCounts(ctx context.Context) (map[string]int64, error) {
 	return s.counts(ctx, "deployments")
 }

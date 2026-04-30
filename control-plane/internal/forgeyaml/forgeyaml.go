@@ -87,6 +87,9 @@ func validate(cfg Config) (Config, error) {
 	if cfg.Run.Port <= 0 || cfg.Run.Port > 65535 {
 		return Config{}, fmt.Errorf("run.port must be between 1 and 65535")
 	}
+	if cfg.Run.Port < 1024 {
+		return Config{}, fmt.Errorf("run.port must be 1024 or higher")
+	}
 	if cfg.Resources.Memory == "" {
 		return Config{}, fmt.Errorf("resources.memory is required")
 	}

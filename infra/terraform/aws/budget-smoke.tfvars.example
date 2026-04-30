@@ -1,5 +1,6 @@
 # Cheapest/safest smoke profile for classic Free Tier-style testing.
 # Expect limited capacity: Grafana + Prometheus + builds can be tight on t3.micro.
+# With create_nat_gateway=false, the worker uses the public subnet for outbound access.
 
 control_plane_instance_type = "t3.micro"
 worker_instance_type        = "t3.micro"

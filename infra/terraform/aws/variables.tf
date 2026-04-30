@@ -55,7 +55,7 @@ variable "private_subnet_cidr" {
 }
 
 variable "create_nat_gateway" {
-  description = "Create a NAT gateway for private worker outbound access. Leave true for the standard private-worker layout."
+  description = "Create a NAT gateway for private worker outbound access. Leave true for the standard private-worker layout; when false, the worker falls back to the public subnet for outbound package access."
   type        = bool
   default     = true
 }
