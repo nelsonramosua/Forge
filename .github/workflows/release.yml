@@ -20,12 +20,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ── 1. Run the full CI suite first ──────────────────────────────────────────
+  # ── 1. Run the full CI suite first
   ci:
     name: Full CI gate
     uses: ./.github/workflows/ci.yml
 
-  # ── 2. Build binaries (amd64 + arm64) ───────────────────────────────────────
+  # 2. Build binaries (amd64 + arm64)
   build:
     name: Build (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -132,7 +132,7 @@ jobs:
             forge-linux-${{ matrix.arch }}.tar.gz.sha256
           retention-days: 1
 
-  # ── 3. Produce combined SHA256SUMS + publish release ────────────────────────
+  # 3. Produce combined SHA256SUMS + publish release
   publish:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
@@ -184,7 +184,7 @@ jobs:
             dist/forge-linux-arm64.tar.gz.sha256
             dist/SHA256SUMS
 
-  # ── 4. Post-release smoke: install from release tarball and check binaries ───
+  # 4. Post-release smoke: install from release tarball and check binaries
   smoke:
     name: Post-release smoke (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
