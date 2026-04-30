@@ -101,15 +101,6 @@ jobs:
               --output text)"
           fi
 
-          if [ -n "${sg_id}" ] && [ "${sg_id}" != "None" ]; then
-            if ! aws ec2 describe-security-groups --group-ids "${sg_id}" >/dev/null 2>&1; then
-              echo "::error::Control-plane security group ${sg_id} was not found in ${AWS_REGION}."
-              echo "::error::Set FORGE_CONTROL_PLANE_SECURITY_GROUP_ID to the sg-* ID attached to the instance."
-              echo "::error::If the instance is in another region, update the AWS_REGION repository variable."
-              exit 1
-            fi
-          fi
-
           if [ -z "${sg_id}" ] || [ "${sg_id}" = "None" ]; then
             echo "::error::Could not find the control-plane security group."
             echo "::error::Set FORGE_CONTROL_PLANE_SECURITY_GROUP_ID or check AWS_REGION and control-plane IP secrets."
@@ -134,6 +125,10 @@ jobs:
           elif grep -q "InvalidPermission.Duplicate" <<<"${output}"; then
             echo "added=false" >> "$GITHUB_OUTPUT"
             echo "Temporary SSH ingress for ${runner_cidr} already exists on ${sg_id}."
+          elif grep -q "InvalidGroup.NotFound" <<<"${output}"; then
+            echo "::error::Control-plane security group ${sg_id} was not found in ${AWS_REGION}."
+            echo "::error::Check FORGE_CONTROL_PLANE_SECURITY_GROUP_ID and the AWS_REGION repository variable."
+            exit 1
           else
             echo "${output}" >&2
             exit 1
