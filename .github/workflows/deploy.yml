@@ -85,7 +85,7 @@ jobs:
         run: |
           runner_ip="$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]')"
           runner_cidr="${runner_ip}/32"
-          sg_id="${CONTROL_PLANE_SECURITY_GROUP_ID}"
+          sg_id="$(printf '%s' "${CONTROL_PLANE_SECURITY_GROUP_ID}" | tr -d '[:space:]')"
 
           if [ -z "${sg_id}" ]; then
             sg_id="$(aws ec2 describe-instances \
@@ -99,6 +99,15 @@ jobs:
               --filters "Name=private-ip-address,Values=${CONTROL_PLANE_PRIVATE_IP}" \
               --query 'Reservations[].Instances[].SecurityGroups[].GroupId | [0]' \
               --output text)"
+          fi
+
+          if [ -n "${sg_id}" ] && [ "${sg_id}" != "None" ]; then
+            if ! aws ec2 describe-security-groups --group-ids "${sg_id}" >/dev/null 2>&1; then
+              echo "::error::Control-plane security group ${sg_id} was not found in ${AWS_REGION}."
+              echo "::error::Set FORGE_CONTROL_PLANE_SECURITY_GROUP_ID to the sg-* ID attached to the instance."
+              echo "::error::If the instance is in another region, update the AWS_REGION repository variable."
+              exit 1
+            fi
           fi
 
           if [ -z "${sg_id}" ] || [ "${sg_id}" = "None" ]; then
@@ -137,9 +146,12 @@ jobs:
             ansible-lint==24.9.2
 
       - name: Write SSH private key
+        env:
+          FORGE_SSH_PRIVATE_KEY: ${{ secrets.FORGE_SSH_PRIVATE_KEY }}
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.FORGE_SSH_PRIVATE_KEY }}" > ~/.ssh/forge_deploy
+          printf '%s' "${FORGE_SSH_PRIVATE_KEY}" | sed 's/\\n/\n/g' | tr -d '\r' > ~/.ssh/forge_deploy
+          printf '\n' >> ~/.ssh/forge_deploy
           chmod 600 ~/.ssh/forge_deploy
           control_host="${{ secrets.FORGE_CONTROL_PLANE_IP }}"
           reachable=0
@@ -158,14 +170,32 @@ jobs:
           fi
           ssh-keyscan -T 10 -H "${{ secrets.FORGE_WORKER_IP }}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
+      - name: Verify control-plane SSH authentication
+        run: |
+          if ! ssh \
+              -i ~/.ssh/forge_deploy \
+              -o BatchMode=yes \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=15 \
+              ubuntu@"${{ secrets.FORGE_CONTROL_PLANE_IP }}" true; then
+            echo "::error::SSH reached the control plane, but the key was rejected."
+            echo "::error::FORGE_SSH_PRIVATE_KEY must match the EC2 key pair authorized for the ubuntu user."
+            exit 1
+          fi
+
       - name: Write Ansible inventory
         run: |
+          control_ssh_args="-o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15"
+          worker_ssh_args="-o IdentitiesOnly=yes"
+          worker_ssh_args="${worker_ssh_args} -o ProxyJump=ubuntu@${{ secrets.FORGE_CONTROL_PLANE_IP }}"
+          worker_ssh_args="${worker_ssh_args} -o StrictHostKeyChecking=yes -o ConnectTimeout=15"
           cat > infra/ansible/inventory.ini << EOF
           [control_plane]
           control-plane ansible_host=${{ secrets.FORGE_CONTROL_PLANE_IP }} \
             ansible_user=ubuntu \
             ansible_ssh_private_key_file=~/.ssh/forge_deploy \
-            ansible_ssh_common_args='-o StrictHostKeyChecking=yes -o ConnectTimeout=15' \
+            ansible_ssh_common_args='${control_ssh_args}' \
             forge_base_domain=${{ secrets.FORGE_BASE_DOMAIN }} \
             forge_control_plane_private_ip=${{ secrets.FORGE_CONTROL_PLANE_PRIVATE_IP }}
 
@@ -173,7 +203,7 @@ jobs:
           worker ansible_host=${{ secrets.FORGE_WORKER_IP }} \
             ansible_user=ubuntu \
             ansible_ssh_private_key_file=~/.ssh/forge_deploy \
-            ansible_ssh_common_args='-o ProxyJump=ubuntu@${{ secrets.FORGE_CONTROL_PLANE_IP }} -o StrictHostKeyChecking=yes -o ConnectTimeout=15' \
+            ansible_ssh_common_args='${worker_ssh_args}' \
             forge_control_plane_private_ip=${{ secrets.FORGE_CONTROL_PLANE_PRIVATE_IP }}
           EOF
 
