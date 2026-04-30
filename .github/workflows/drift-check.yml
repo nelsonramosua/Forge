@@ -131,7 +131,7 @@ jobs:
 
       - name: Open GitHub issue on drift
         if: steps.plan.outputs.drift == 'true'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');
@@ -183,7 +183,7 @@ jobs:
 
       - name: Close drift issue if there is no more drift
         if: steps.plan.outputs.drift == 'false'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const existing = await github.rest.issues.listForRepo({
