@@ -37,6 +37,10 @@ linters:
       excludes:
         # G304 is "file path from variable" — intentional in forge (git clone paths)
         - G304
+        # G204 is "subprocess with variable" — intentional in forge (git clone/checkout)
+        - G204
+        # G118 is "context.Background in goroutine" — shutdown context is intentionally separate
+        - G118
 
     gocritic:
       enabled-tags:
@@ -45,6 +49,7 @@ linters:
       disabled-checks:
         - hugeParam         # too noisy for this codebase size
         - rangeValCopy
+        - exitAfterDefer    # log.Fatal is intentional in main() and defer still runs
 
     staticcheck:
       checks:

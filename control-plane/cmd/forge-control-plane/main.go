@@ -18,11 +18,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer func() { _ = st.Close() }()
+
 	vt, err := vault.New(cfg.MasterKey)
 	if err != nil {
 		log.Fatal(err)

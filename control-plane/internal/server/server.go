@@ -668,18 +668,18 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	_ = fmt.Fprintln(w, "# HELP forge_deployments_total Deployments by state.")
-	_ = fmt.Fprintln(w, "# TYPE forge_deployments_total gauge")
+	_, _ = fmt.Fprintln(w, "# HELP forge_deployments_total Deployments by state.")
+	_, _ = fmt.Fprintln(w, "# TYPE forge_deployments_total gauge")
 	for status, count := range deploymentCounts {
 		_, _ = fmt.Fprintf(w, "forge_deployments_total{status=%q} %d\n", status, count)
 	}
-	_ = fmt.Fprintln(w, "# HELP forge_tasks_total Tasks by state.")
-	_ = fmt.Fprintln(w, "# TYPE forge_tasks_total gauge")
+	_, _ = fmt.Fprintln(w, "# HELP forge_tasks_total Tasks by state.")
+	_, _ = fmt.Fprintln(w, "# TYPE forge_tasks_total gauge")
 	for status, count := range taskCounts {
 		_, _ = fmt.Fprintf(w, "forge_tasks_total{status=%q} %d\n", status, count)
 	}
-	_ = fmt.Fprintln(w, "# HELP forge_agents_online Online worker agents.")
-	_ = fmt.Fprintln(w, "# TYPE forge_agents_online gauge")
+	_, _ = fmt.Fprintln(w, "# HELP forge_agents_online Online worker agents.")
+	_, _ = fmt.Fprintln(w, "# TYPE forge_agents_online gauge")
 	_, _ = fmt.Fprintf(w, "forge_agents_online %d\n", len(agents))
 }
 
