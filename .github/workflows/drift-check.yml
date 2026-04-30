@@ -27,9 +27,9 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ secrets.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
       # If it does not already exist, create an S3 bucket
       - name: Ensure S3 bucket and DynamoDB table for Terraform state
@@ -161,7 +161,8 @@ jobs:
                 owner:    context.repo.owner,
                 repo:     context.repo.repo,
                 issue_number: duplicate.number,
-                body: `### New detection — ${new Date().toISOString()}\n\n\`\`\`\n${safe}\n\`\`\`\n\n[Ver run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
+                body: `### New detection — ${new Date().toISOString()}\n\n\`\`\`\n${safe}\n\`\`\`\n\n` +
+                      `[View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
               });
               console.log(`Comment added to issue #${duplicate.number}`);
             } else {
@@ -170,7 +171,12 @@ jobs:
                 repo:   context.repo.repo,
                 title,
                 labels: ['drift', 'infrastructure'],
-                body:   `## Drift detected in AWS infra\n\nO \`terraform plan\` found differences between state and the real infra.\n\n### Changes:\n\n\`\`\`\n${safe}\n\`\`\`\n\n### Next steps\n1. Verify if the updates are as expected.\n2. If yes: run \`terraform apply\` to update state, or \`terraform import\` if they were created outside Terraform\n3. If not: investigate who/what modified infra\n\n[See complete run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
+                body: `## Drift detected in AWS infrastructure\n\nThe \`terraform plan\` found differences between state and infrastructure.\n\n` +
+                      `### Changes\n\n\`\`\`\n${safe}\n\`\`\`\n\n### Next steps\n` +
+                      `1. Verify if changes are expected\n` +
+                      `2. If yes: run \`terraform apply\` to update state\n` +
+                      `3. If no: investigate who modified infrastructure\n\n` +
+                      `[View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
               });
               console.log(`Issue created: #${issue.data.number}`);
             }
