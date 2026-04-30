@@ -56,7 +56,7 @@ func (s *Server) Run(ctx context.Context) error {
 		Handler:           s.routes(ctx),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	go func() {
+	go func() { // #nosec G118 -- shutdown needs a fresh deadline after the parent context is canceled.
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -1005,7 +1005,7 @@ func (s *Server) cloneAndParseForgeYAML(ctx context.Context, repoURL string, bra
 	}
 	cloneCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(cloneCtx, "git", "clone", "--depth=1", "--branch", branch, repoURL, target)
+	cmd := exec.CommandContext(cloneCtx, "git", "clone", "--depth=1", "--branch", branch, repoURL, target) // #nosec G204 -- branch and repoURL are validated before git sees them.
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return forgeyaml.Config{}, fmt.Errorf("git clone failed: %w: %s", err, strings.TrimSpace(string(output)))
@@ -1014,12 +1014,12 @@ func (s *Server) cloneAndParseForgeYAML(ctx context.Context, repoURL string, bra
 		if !validCommitSHA(commit) {
 			return forgeyaml.Config{}, fmt.Errorf("invalid commit sha")
 		}
-		checkout := exec.CommandContext(cloneCtx, "git", "-C", target, "checkout", "--detach", commit)
+		checkout := exec.CommandContext(cloneCtx, "git", "-C", target, "checkout", "--detach", commit) // #nosec G204 -- commit is restricted to a hex object id.
 		if output, err := checkout.CombinedOutput(); err != nil {
 			return forgeyaml.Config{}, fmt.Errorf("git checkout failed: %w: %s", err, strings.TrimSpace(string(output)))
 		}
 	}
-	data, err := os.ReadFile(filepath.Join(target, "forge.yaml"))
+	data, err := os.ReadFile(filepath.Join(target, "forge.yaml")) // #nosec G304 -- target is a freshly created clone directory under the configured work dir.
 	if err != nil {
 		return forgeyaml.Config{}, fmt.Errorf("read forge.yaml: %w", err)
 	}
