@@ -93,7 +93,13 @@ jobs:
           echo "runner_cidr=${runner_cidr}" >> "$GITHUB_OUTPUT"
           echo "sg_id=${sg_id}" >> "$GITHUB_OUTPUT"
 
-          permission="$(printf '[{"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges":[{"CidrIp":"%s","Description":"Forge GitHub Actions deploy %s"}]}]' "${runner_cidr}" "${GITHUB_RUN_ID}")"
+          permission="$(
+            printf '%s' '[{"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges":['
+            printf '{"CidrIp":"%s","Description":"Forge GitHub Actions deploy %s"}' \
+              "${runner_cidr}" \
+              "${GITHUB_RUN_ID}"
+            printf '%s' ']}]'
+          )"
           if output="$(aws ec2 authorize-security-group-ingress \
               --group-id "${sg_id}" \
               --ip-permissions "${permission}" 2>&1)"; then
@@ -128,7 +134,9 @@ jobs:
             sleep 5
           done
           if [ "${reachable}" -ne 1 ]; then
-            echo "::error::Cannot reach control-plane SSH at FORGE_CONTROL_PLANE_IP:22. Check the secret value, instance state, and the AWS admin_cidr/security group. GitHub-hosted runners need SSH ingress or deploy must run from a reachable self-hosted runner/VPN."
+            echo "::error::Cannot reach control-plane SSH at FORGE_CONTROL_PLANE_IP:22."
+            echo "::error::Check the secret value, instance state, and the AWS admin_cidr/security group."
+            echo "::error::GitHub-hosted runners need SSH ingress or deploy must run from a reachable self-hosted runner/VPN."
             exit 1
           fi
           ssh-keyscan -T 10 -H "${{ secrets.FORGE_WORKER_IP }}" >> ~/.ssh/known_hosts 2>/dev/null || true
