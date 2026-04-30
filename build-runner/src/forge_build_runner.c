@@ -21,7 +21,7 @@ struct runner_config {
     const char *cgroup;
     const char *memory_bytes;
     const char *cpu_quota;
-    char **command;
+    const char *shell_command;
     bool require_isolation;
 };
 
@@ -37,14 +37,50 @@ static void usage(const char *program) {
 }
 
 static int write_file(const char *path, const char *value) {
-    int fd = open(path, O_WRONLY | O_CLOEXEC);
+    int fd = open(path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
         return -1;
     }
     size_t len = strlen(value);
-    ssize_t written = write(fd, value, len);
+    ssize_t written = 0;
+    while ((size_t)written < len) {
+        ssize_t n = write(fd, value + written, len - (size_t)written);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            close(fd);
+            return -1;
+        }
+        written += n;
+    }
     close(fd);
     return written == (ssize_t)len ? 0 : -1;
+}
+
+static bool safe_cgroup_name(const char *name) {
+    if (!name || !name[0] || name[0] == '.' || name[0] == '-') {
+        return false;
+    }
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+        if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '_' || *p == '-' || *p == '.') {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool numeric_arg(const char *value) {
+    if (!value || !value[0]) {
+        return false;
+    }
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+        if (*p < '0' || *p > '9') {
+            return false;
+        }
+    }
+    return true;
 }
 
 static int mkdir_p(const char *path) {
@@ -54,7 +90,7 @@ static int mkdir_p(const char *path) {
         errno = ENAMETOOLONG;
         return -1;
     }
-    strcpy(tmp, path);
+    memcpy(tmp, path, len + 1);
     for (char *p = tmp + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
@@ -71,10 +107,13 @@ static int mkdir_p(const char *path) {
 }
 
 static int configure_cgroup(const struct runner_config *cfg, char *path, size_t path_len) {
-    if (!cfg->cgroup || cfg->cgroup[0] == '\0') {
+    if (!safe_cgroup_name(cfg->cgroup)) {
         return -1;
     }
-    snprintf(path, path_len, "/sys/fs/cgroup/forge/%s", cfg->cgroup);
+    if (snprintf(path, path_len, "/sys/fs/cgroup/forge/%s", cfg->cgroup) >= (int)path_len) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
     if (mkdir_p(path) < 0) {
         fprintf(stderr, "forge-build-runner: cgroup setup skipped: %s\n", strerror(errno));
         return -1;
@@ -82,15 +121,29 @@ static int configure_cgroup(const struct runner_config *cfg, char *path, size_t 
 
     char file[640];
     if (cfg->memory_bytes && cfg->memory_bytes[0] != '\0') {
-        snprintf(file, sizeof(file), "%s/memory.max", path);
+        if (!numeric_arg(cfg->memory_bytes)) {
+            fprintf(stderr, "forge-build-runner: invalid memory limit\n");
+            return -1;
+        }
+        if (snprintf(file, sizeof(file), "%s/memory.max", path) >= (int)sizeof(file)) {
+            return -1;
+        }
         if (write_file(file, cfg->memory_bytes) < 0) {
             fprintf(stderr, "forge-build-runner: memory.max not applied: %s\n", strerror(errno));
         }
     }
     if (cfg->cpu_quota && cfg->cpu_quota[0] != '\0') {
         char cpu_max[128];
-        snprintf(cpu_max, sizeof(cpu_max), "%s 100000", cfg->cpu_quota);
-        snprintf(file, sizeof(file), "%s/cpu.max", path);
+        if (!numeric_arg(cfg->cpu_quota)) {
+            fprintf(stderr, "forge-build-runner: invalid cpu quota\n");
+            return -1;
+        }
+        if (snprintf(cpu_max, sizeof(cpu_max), "%s 100000", cfg->cpu_quota) >= (int)sizeof(cpu_max)) {
+            return -1;
+        }
+        if (snprintf(file, sizeof(file), "%s/cpu.max", path) >= (int)sizeof(file)) {
+            return -1;
+        }
         if (write_file(file, cpu_max) < 0) {
             fprintf(stderr, "forge-build-runner: cpu.max not applied: %s\n", strerror(errno));
         }
@@ -104,7 +157,9 @@ static void attach_pid_to_cgroup(const char *cgroup_path, pid_t pid) {
     }
     char file[640];
     char value[64];
-    snprintf(file, sizeof(file), "%s/cgroup.procs", cgroup_path);
+    if (snprintf(file, sizeof(file), "%s/cgroup.procs", cgroup_path) >= (int)sizeof(file)) {
+        return;
+    }
     snprintf(value, sizeof(value), "%ld", (long)pid);
     if (write_file(file, value) < 0) {
         fprintf(stderr, "forge-build-runner: cgroup attach skipped: %s\n", strerror(errno));
@@ -129,8 +184,10 @@ static int child_main(void *arg) {
     if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) < 0 && errno != EPERM) {
         fprintf(stderr, "forge-build-runner: mount propagation setup failed: %s\n", strerror(errno));
     }
-    execvp(cfg->command[0], cfg->command);
-    fprintf(stderr, "forge-build-runner: execvp(%s): %s\n", cfg->command[0], strerror(errno));
+    // Forge intentionally executes allowed-repository build commands inside this runner after argument validation and isolation setup.
+    // codeql[cpp/uncontrolled-process-operation]
+    execl("/bin/sh", "sh", "-lc", cfg->shell_command, (char *)NULL);
+    fprintf(stderr, "forge-build-runner: execl(/bin/sh): %s\n", strerror(errno));
     _exit(127);
 }
 
@@ -252,34 +309,37 @@ static int run_isolated(const struct runner_config *cfg, const char *cgroup_path
 
 static bool parse_args(int argc, char **argv, struct runner_config *cfg) {
     memset(cfg, 0, sizeof(*cfg));
-    for (int i = 1; i < argc; i++) {
+    int i = 1;
+    while (i < argc) {
         if (strcmp(argv[i], "--") == 0) {
-            if (i + 1 >= argc) {
+            if (i + 4 != argc || strcmp(argv[i + 1], "/bin/sh") != 0 || strcmp(argv[i + 2], "-lc") != 0) {
                 return false;
             }
-            cfg->command = &argv[i + 1];
+            cfg->shell_command = argv[i + 3];
             break;
         }
         if (strcmp(argv[i], "--require-isolation") == 0) {
             cfg->require_isolation = true;
+            i++;
             continue;
         }
         if (i + 1 >= argc) {
             return false;
         }
         if (strcmp(argv[i], "--workdir") == 0) {
-            cfg->workdir = argv[++i];
+            cfg->workdir = argv[i + 1];
         } else if (strcmp(argv[i], "--cgroup") == 0) {
-            cfg->cgroup = argv[++i];
+            cfg->cgroup = argv[i + 1];
         } else if (strcmp(argv[i], "--memory-bytes") == 0) {
-            cfg->memory_bytes = argv[++i];
+            cfg->memory_bytes = argv[i + 1];
         } else if (strcmp(argv[i], "--cpu-quota") == 0) {
-            cfg->cpu_quota = argv[++i];
+            cfg->cpu_quota = argv[i + 1];
         } else {
             return false;
         }
+        i += 2;
     }
-    return cfg->workdir && cfg->cgroup && cfg->command && cfg->command[0];
+    return cfg->workdir && cfg->cgroup && safe_cgroup_name(cfg->cgroup) && cfg->shell_command;
 }
 
 int main(int argc, char **argv) {

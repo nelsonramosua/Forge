@@ -1005,7 +1005,8 @@ func (s *Server) cloneAndParseForgeYAML(ctx context.Context, repoURL string, bra
 	}
 	cloneCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(cloneCtx, "git", "clone", "--depth=1", "--branch", branch, repoURL, target) // #nosec G204 -- branch and repoURL are validated before git sees them.
+	// #nosec G204 -- branch and repoURL are validated before git sees them, and -- prevents repoURL from being parsed as a flag.
+	cmd := exec.CommandContext(cloneCtx, "git", "clone", "--depth=1", "--branch", branch, "--", repoURL, target)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return forgeyaml.Config{}, fmt.Errorf("git clone failed: %w: %s", err, strings.TrimSpace(string(output)))

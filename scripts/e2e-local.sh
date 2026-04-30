@@ -103,6 +103,7 @@ fi
 
 FORGE_CONTROL_PLANE_URL="${CONTROL_URL}" \
 FORGE_RUNNER_PATH="${ROOT_DIR}/bin/forge-build-runner" \
+FORGE_AGENT_APP_ROOT="${TMP_DIR}/agent-apps" \
 FORGE_METRICS_SOCKET="${TMP_DIR}/agent-metrics.sock" \
 FORGE_AGENT_TOKEN="${AGENT_TOKEN}" \
 FORGE_AGENT_ID=local-agent \

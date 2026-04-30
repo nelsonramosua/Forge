@@ -35,6 +35,7 @@ struct agent_config {
     char token[256];
     char runner_path[256];
     char metrics_socket[256];
+    char app_root[512];
     char advertised_address[128];
     int poll_sleep_seconds;
     int build_timeout_seconds;
@@ -93,9 +94,15 @@ struct process_monitor_arg {
     pid_t pid;
 };
 
+enum capture_program {
+    CAPTURE_GIT,
+    CAPTURE_RUNNER,
+};
+
 static int kill_cgroup_processes(const char *cgroup_path);
 static int run_stop_task(const struct agent_config *cfg, const struct task *task);
 static void sleep_millis(long ms);
+static bool is_commit_sha(const char *value);
 
 static volatile sig_atomic_t running = 1;
 static struct metrics_state metrics = {.mu = PTHREAD_MUTEX_INITIALIZER};
@@ -124,6 +131,7 @@ static void load_config(struct agent_config *cfg) {
     snprintf(cfg->token, sizeof(cfg->token), "%s", env_or("FORGE_AGENT_TOKEN", ""));
     snprintf(cfg->runner_path, sizeof(cfg->runner_path), "%s", env_or("FORGE_RUNNER_PATH", "./bin/forge-build-runner"));
     snprintf(cfg->metrics_socket, sizeof(cfg->metrics_socket), "%s", env_or("FORGE_METRICS_SOCKET", "/tmp/forge-agent-metrics.sock"));
+    snprintf(cfg->app_root, sizeof(cfg->app_root), "%s", env_or("FORGE_AGENT_APP_ROOT", "/var/lib/forge-agent/apps"));
     snprintf(cfg->advertised_address, sizeof(cfg->advertised_address), "%s", env_or("FORGE_AGENT_ADDRESS", ""));
     cfg->require_isolation = env_bool("FORGE_REQUIRE_ISOLATION", true);
     cfg->poll_sleep_seconds = atoi(env_or("FORGE_AGENT_POLL_SECONDS", "2"));
@@ -149,7 +157,7 @@ static int mkdir_p(const char *path) {
         errno = ENAMETOOLONG;
         return -1;
     }
-    strcpy(tmp, path);
+    memcpy(tmp, path, len + 1);
     for (char *p = tmp + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
@@ -219,33 +227,141 @@ static char *format_json(const char *fmt, ...) {
 }
 
 static bool parse_control_url(const char *url, char *host, size_t host_len, int *port) {
-    const char *p = url;
-    if (strncmp(p, "http://", 7) == 0) {
-        p += 7;
-    } else if (strncmp(p, "https://", 8) == 0) {
-        fprintf(stderr, "forge-agent: https control plane URLs require a TLS-capable proxy; use http:// locally\n");
+    const char *scheme = "http://";
+    size_t scheme_len = strlen(scheme);
+    if (strncmp(url, scheme, scheme_len) != 0) {
+        if (strncmp(url, "https://", 8) == 0) {
+            fprintf(stderr, "forge-agent: https control plane URLs require a TLS-capable proxy; use http:// locally\n");
+        }
         return false;
     }
+
+    const char *p = url + scheme_len;
     const char *slash = strchr(p, '/');
     size_t authority_len = slash ? (size_t)(slash - p) : strlen(p);
+    if (authority_len == 0 || memchr(p, '@', authority_len) || memchr(p, '?', authority_len) || memchr(p, '#', authority_len)) {
+        return false;
+    }
+
     const char *colon = memchr(p, ':', authority_len);
+    size_t name_len = colon ? (size_t)(colon - p) : authority_len;
+    if (name_len == 0 || name_len >= host_len) {
+        return false;
+    }
+    for (size_t i = 0; i < name_len; i++) {
+        unsigned char c = (unsigned char)p[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-') {
+            continue;
+        }
+        return false;
+    }
+
+    memcpy(host, p, name_len);
+    host[name_len] = '\0';
     if (colon) {
-        size_t len = (size_t)(colon - p);
-        if (len >= host_len) {
+        const char *port_start = colon + 1;
+        size_t port_len = authority_len - name_len - 1;
+        if (port_len == 0 || port_len > 5) {
             return false;
         }
-        memcpy(host, p, len);
-        host[len] = '\0';
-        *port = atoi(colon + 1);
+        int parsed_port = 0;
+        for (size_t i = 0; i < port_len; i++) {
+            unsigned char c = (unsigned char)port_start[i];
+            if (c < '0' || c > '9') {
+                return false;
+            }
+            parsed_port = parsed_port * 10 + (int)(c - '0');
+        }
+        if (parsed_port <= 0 || parsed_port > 65535) {
+            return false;
+        }
+        *port = parsed_port;
     } else {
-        if (authority_len >= host_len) {
-            return false;
-        }
-        memcpy(host, p, authority_len);
-        host[authority_len] = '\0';
         *port = 80;
     }
-    return host[0] && *port > 0;
+    return true;
+}
+
+static bool path_has_traversal(const char *path) {
+    const char *p = path;
+    while (*p) {
+        while (*p == '/') {
+            p++;
+        }
+        const char *start = p;
+        while (*p && *p != '/') {
+            p++;
+        }
+        size_t len = (size_t)(p - start);
+        if (len == 2 && start[0] == '.' && start[1] == '.') {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool path_under_base(const char *path, const char *base) {
+    if (!path || !base || path[0] != '/' || base[0] != '/' || path_has_traversal(path) || path_has_traversal(base)) {
+        return false;
+    }
+    size_t base_len = strlen(base);
+    while (base_len > 1 && base[base_len - 1] == '/') {
+        base_len--;
+    }
+    return strncmp(path, base, base_len) == 0 && (path[base_len] == '\0' || path[base_len] == '/');
+}
+
+static bool safe_repo_part(const char *value, size_t len) {
+    if (len == 0 || value[0] == '.' || value[0] == '-') {
+        return false;
+    }
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)value[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.') {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool safe_github_repo_url(const char *value) {
+    const char *prefix = "https://github.com/";
+    size_t prefix_len = strlen(prefix);
+    size_t len = strlen(value);
+    if (strncmp(value, prefix, prefix_len) != 0 || len <= prefix_len + 4 || strcmp(value + len - 4, ".git") != 0) {
+        return false;
+    }
+    const char *repo = value + prefix_len;
+    size_t repo_len = len - prefix_len - 4;
+    const char *slash = memchr(repo, '/', repo_len);
+    if (!slash || memchr(slash + 1, '/', repo_len - (size_t)(slash - repo) - 1)) {
+        return false;
+    }
+    return safe_repo_part(repo, (size_t)(slash - repo)) && safe_repo_part(slash + 1, repo_len - (size_t)(slash - repo) - 1);
+}
+
+static bool safe_repo_url(const char *value) {
+    if (safe_github_repo_url(value)) {
+        return true;
+    }
+    return path_under_base(value, "/tmp");
+}
+
+static bool safe_runner_path(const char *path) {
+    if (strcmp(path, "/usr/local/bin/forge-build-runner") == 0 || strcmp(path, "./bin/forge-build-runner") == 0) {
+        return true;
+    }
+    const char *suffix = "/bin/forge-build-runner";
+    size_t path_len = strlen(path);
+    size_t suffix_len = strlen(suffix);
+    return path_len > suffix_len && path[0] == '/' && !path_has_traversal(path) && strcmp(path + path_len - suffix_len, suffix) == 0;
+}
+
+static bool task_security_valid(const struct agent_config *cfg, const struct task *task) {
+    return path_under_base(task->workdir, cfg->app_root) &&
+           safe_repo_url(task->repo_url) &&
+           (!task->commit_sha[0] || is_commit_sha(task->commit_sha));
 }
 
 static int connect_tcp(const char *host, int port) {
@@ -630,7 +746,8 @@ static int complete_task(const struct agent_config *cfg, long task_id, const cha
     return rc;
 }
 
-static int run_capture(const struct agent_config *cfg, long task_id, char *const argv[], const char *cwd, int timeout_seconds) {
+// Runs a controlled child command, captures its output, and streams that output back to the control plane as task events.
+static int run_capture(const struct agent_config *cfg, long task_id, enum capture_program program, char *const argv[], const char *cwd, int timeout_seconds) {
     int pipefd[2];
     if (pipe(pipefd) < 0) {
         return 127;
@@ -652,8 +769,16 @@ static int run_capture(const struct agent_config *cfg, long task_id, char *const
                 _exit(127);
             }
         }
-        execvp(argv[0], argv);
-        fprintf(stderr, "execvp(%s): %s\n", argv[0], strerror(errno));
+        if (program == CAPTURE_GIT) {
+            execvp("git", argv);
+            fprintf(stderr, "execvp(git): %s\n", strerror(errno));
+        } else if (program == CAPTURE_RUNNER && safe_runner_path(cfg->runner_path)) {
+            // codeql[cpp/uncontrolled-process-operation]
+            execv(cfg->runner_path, argv);
+            fprintf(stderr, "execv(%s): %s\n", cfg->runner_path, strerror(errno));
+        } else {
+            fprintf(stderr, "forge-agent: invalid capture program\n");
+        }
         _exit(127);
     }
     close(pipefd[1]);
@@ -778,7 +903,7 @@ static int ensure_repo(const struct agent_config *cfg, const struct task *task, 
     join_path(src, src_len, task->workdir, "src");
     if (!file_exists(src)) {
         char *clone_argv[] = {"git", "clone", "--depth=1", (char *)task->repo_url, src, NULL};
-        int code = run_capture(cfg, task->id, clone_argv, NULL, 0);
+        int code = run_capture(cfg, task->id, CAPTURE_GIT, clone_argv, NULL, 0);
         if (code != 0) {
             return code;
         }
@@ -789,14 +914,14 @@ static int ensure_repo(const struct agent_config *cfg, const struct task *task, 
             return 1;
         }
         char *checkout_argv[] = {"git", "-C", src, "checkout", "--detach", (char *)task->commit_sha, NULL};
-        int code = run_capture(cfg, task->id, checkout_argv, NULL, 0);
+        int code = run_capture(cfg, task->id, CAPTURE_GIT, checkout_argv, NULL, 0);
         if (code != 0) {
             char *fetch_argv[] = {"git", "-C", src, "fetch", "--depth=1", "origin", (char *)task->commit_sha, NULL};
-            int fetch_code = run_capture(cfg, task->id, fetch_argv, NULL, 0);
+            int fetch_code = run_capture(cfg, task->id, CAPTURE_GIT, fetch_argv, NULL, 0);
             if (fetch_code != 0) {
                 return fetch_code;
             }
-            code = run_capture(cfg, task->id, checkout_argv, NULL, 0);
+            code = run_capture(cfg, task->id, CAPTURE_GIT, checkout_argv, NULL, 0);
             if (code != 0) {
                 return code;
             }
@@ -845,7 +970,7 @@ static int run_build_task(const struct agent_config *cfg, const struct task *tas
         argv[arg++] = "-lc";
         argv[arg++] = task->build_commands[i];
         argv[arg] = NULL;
-        code = run_capture(cfg, task->id, argv, NULL, cfg->build_timeout_seconds);
+        code = run_capture(cfg, task->id, CAPTURE_RUNNER, argv, NULL, cfg->build_timeout_seconds);
         if (code != 0) {
             if (code == 124) {
                 complete_task(cfg, task->id, "failed", "build command timed out", 0, 0);
@@ -860,12 +985,23 @@ static int run_build_task(const struct agent_config *cfg, const struct task *tas
 }
 
 static int write_file(const char *path, const char *value) {
-    int fd = open(path, O_WRONLY | O_CLOEXEC);
+    int fd = open(path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
         return -1;
     }
     size_t len = strlen(value);
-    ssize_t written = write(fd, value, len);
+    ssize_t written = 0;
+    while ((size_t)written < len) {
+        ssize_t n = write(fd, value + written, len - (size_t)written);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            close(fd);
+            return -1;
+        }
+        written += n;
+    }
     close(fd);
     return written == (ssize_t)len ? 0 : -1;
 }
@@ -1045,6 +1181,8 @@ static int run_app_task(const struct agent_config *cfg, const struct task *task)
         for (int i = 0; i < task->env_count; i++) {
             setenv(task->env[i].key, task->env[i].value, 1);
         }
+        // Forge intentionally starts allowed-repository application commands after task security validation.
+        // codeql[cpp/uncontrolled-process-operation]
         execl("/bin/sh", "sh", "-lc", task->run_command, (char *)NULL);
         fprintf(stderr, "exec run command: %s\n", strerror(errno));
         _exit(127);
@@ -1096,7 +1234,9 @@ static int register_agent(const struct agent_config *cfg) {
     char *id = json_escape(cfg->agent_id);
     char *host = json_escape(hostname);
     char *address = json_escape(cfg->advertised_address);
-    char *body = format_json("{\"id\":\"%s\",\"hostname\":\"%s\",\"address\":\"%s\",\"cpu_capacity\":%.2f,\"memory_capacity\":%ld,\"cpu_used\":0,\"memory_used\":0}",
+    const char *body_format = "{\"id\":\"%s\",\"hostname\":\"%s\",\"address\":\"%s\","
+                              "\"cpu_capacity\":%.2f,\"memory_capacity\":%ld,\"cpu_used\":0,\"memory_used\":0}";
+    char *body = format_json(body_format,
                              id ? id : cfg->agent_id,
                              host ? host : hostname,
                              address ? address : "",
@@ -1144,10 +1284,16 @@ static int heartbeat(const struct agent_config *cfg) {
     return rc;
 }
 
+// Validates and dispatches one control-plane task into the build, run, or stop execution paths.
 static void handle_task(const struct agent_config *cfg, const char *json) {
     struct task task;
     if (!parse_task(json, &task)) {
         fprintf(stderr, "forge-agent: could not parse task: %s\n", json);
+        return;
+    }
+    if (!task_security_valid(cfg, &task)) {
+        complete_task(cfg, task.id, "failed", "task failed security validation", 0, 0);
+        task_free(&task);
         return;
     }
     if (strcmp(task.action, "stop") == 0) {
@@ -1164,17 +1310,23 @@ static void handle_task(const struct agent_config *cfg, const char *json) {
 
 static int kill_cgroup_processes(const char *cgroup_path) {
     char file[1024];
-    snprintf(file, sizeof(file), "%s/cgroup.kill", cgroup_path);
-    FILE *fp = fopen(file, "w");
-    if (fp) {
-        fputs("1", fp);
-        if (fclose(fp) == 0) {
-            return 0;
+    if (snprintf(file, sizeof(file), "%s/cgroup.kill", cgroup_path) < (int)sizeof(file)) {
+        int fd = open(file, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd >= 0) {
+            ssize_t n = write(fd, "1", 1);
+            int saved_errno = errno;
+            close(fd);
+            errno = saved_errno;
+            if (n == 1) {
+                return 0;
+            }
         }
     }
 
-    snprintf(file, sizeof(file), "%s/cgroup.procs", cgroup_path);
-    fp = fopen(file, "r");
+    if (snprintf(file, sizeof(file), "%s/cgroup.procs", cgroup_path) >= (int)sizeof(file)) {
+        return 0;
+    }
+    FILE *fp = fopen(file, "r");
     if (!fp) {
         return 0;
     }
