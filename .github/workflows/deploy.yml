@@ -163,7 +163,6 @@ jobs:
             echo "::error::GitHub-hosted runners need SSH ingress or deploy must run from a reachable self-hosted runner/VPN."
             exit 1
           fi
-          ssh-keyscan -T 10 -H "${{ secrets.FORGE_WORKER_IP }}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Validate SSH private key
         run: |
@@ -189,12 +188,47 @@ jobs:
             exit 1
           fi
 
+      - name: Verify worker SSH through control plane
+        if: ${{ inputs.target == 'workers' || inputs.target == 'all' || inputs.target == '' }}
+        env:
+          CONTROL_PLANE_IP: ${{ secrets.FORGE_CONTROL_PLANE_IP }}
+          WORKER_IP: ${{ secrets.FORGE_WORKER_IP }}
+        run: |
+          if [ -z "${WORKER_IP}" ]; then
+            echo "::error::FORGE_WORKER_IP is required when deploying workers."
+            exit 1
+          fi
+
+          proxy_cmd="ssh -i ~/.ssh/forge_deploy"
+          proxy_cmd="${proxy_cmd} -o BatchMode=yes -o IdentitiesOnly=yes"
+          proxy_cmd="${proxy_cmd} -o StrictHostKeyChecking=yes"
+          proxy_cmd="${proxy_cmd} -W %h:%p ubuntu@${CONTROL_PLANE_IP}"
+
+          if ! ssh \
+              -i ~/.ssh/forge_deploy \
+              -o BatchMode=yes \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=accept-new \
+              -o ConnectTimeout=15 \
+              -o "ProxyCommand=${proxy_cmd}" \
+              ubuntu@"${WORKER_IP}" true; then
+            echo "::error::SSH could not reach the worker through the control plane."
+            echo "::error::FORGE_WORKER_IP must be the worker private IP reachable from the Forge VPC."
+            echo "::error::The worker security group must allow SSH from the control-plane security group."
+            echo "::error::The deploy public key must also be in /home/ubuntu/.ssh/authorized_keys on the worker."
+            exit 1
+          fi
+
       - name: Write Ansible inventory
         run: |
           control_ssh_args="-o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15"
           worker_ssh_args="-o IdentitiesOnly=yes"
-          worker_ssh_args="${worker_ssh_args} -o ProxyJump=ubuntu@${{ secrets.FORGE_CONTROL_PLANE_IP }}"
-          worker_ssh_args="${worker_ssh_args} -o StrictHostKeyChecking=yes -o ConnectTimeout=15"
+          worker_ssh_args="${worker_ssh_args} -o StrictHostKeyChecking=accept-new"
+          worker_proxy="ssh -i ~/.ssh/forge_deploy"
+          worker_proxy="${worker_proxy} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+          worker_proxy="${worker_proxy} -W %h:%p ubuntu@${{ secrets.FORGE_CONTROL_PLANE_IP }}"
+          worker_ssh_args="${worker_ssh_args} -o ProxyCommand=\"${worker_proxy}\""
+          worker_ssh_args="${worker_ssh_args} -o ConnectTimeout=15"
           cat > infra/ansible/inventory.ini << EOF
           [control_plane]
           control-plane ansible_host=${{ secrets.FORGE_CONTROL_PLANE_IP }} \
