@@ -165,6 +165,16 @@ jobs:
           fi
           ssh-keyscan -T 10 -H "${{ secrets.FORGE_WORKER_IP }}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
+      - name: Validate SSH private key
+        run: |
+          if ! ssh-keygen -y -f ~/.ssh/forge_deploy > ~/.ssh/forge_deploy.pub; then
+            echo "::error::FORGE_SSH_PRIVATE_KEY is invalid or passphrase-protected."
+            echo "::error::Use an unencrypted private key whose public key is in /home/ubuntu/.ssh/authorized_keys."
+            exit 1
+          fi
+          echo "Deploy key fingerprint:"
+          ssh-keygen -lf ~/.ssh/forge_deploy.pub
+
       - name: Verify control-plane SSH authentication
         run: |
           if ! ssh \
