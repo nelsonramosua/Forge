@@ -110,11 +110,6 @@ variable "worker_assign_public_ip" {
   description = "Assign a public IP to the worker for outbound Internet without NAT. Leave false for private-worker deployments; enable only if you need direct Internet access."
   type        = bool
   default     = true
-
-  validation {
-    condition     = var.worker_assign_public_ip || var.create_nat_gateway
-    error_message = "worker_assign_public_ip=false requires create_nat_gateway=true so the worker still has outbound Internet access."
-  }
 }
 
 variable "create_dns_zone" {

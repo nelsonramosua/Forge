@@ -1270,28 +1270,28 @@ static void *metrics_server_thread(void *arg) {
         time_t last = metrics.last_heartbeat;
         pthread_mutex_unlock(&metrics.mu);
 
-        char body[1024];
-        int body_len = snprintf(body, sizeof(body),
-                                "# HELP forge_agent_cpu_used Load average reported by the agent.\n"
-                                "# TYPE forge_agent_cpu_used gauge\n"
-                                "forge_agent_cpu_used %.2f\n"
-                                "# HELP forge_agent_memory_used_bytes Memory used on the worker.\n"
-                                "# TYPE forge_agent_memory_used_bytes gauge\n"
-                                "forge_agent_memory_used_bytes %ld\n"
-                                "# HELP forge_agent_memory_capacity_bytes Memory capacity on the worker.\n"
-                                "# TYPE forge_agent_memory_capacity_bytes gauge\n"
-                                "forge_agent_memory_capacity_bytes %ld\n"
-                                "# HELP forge_agent_processes Running app processes launched by the agent.\n"
-                                "# TYPE forge_agent_processes gauge\n"
-                                "forge_agent_processes %d\n"
-                                "# HELP forge_agent_last_heartbeat_seconds Last heartbeat unix timestamp.\n"
-                                "# TYPE forge_agent_last_heartbeat_seconds gauge\n"
-                                "forge_agent_last_heartbeat_seconds %ld\n",
-                                cpu_used,
-                                memory_used,
-                                memory_cap,
-                                processes,
-                                (long)last);
+        char *body = format_json(
+                    "# HELP forge_agent_cpu_used Load average reported by the agent.\n"
+                    "# TYPE forge_agent_cpu_used gauge\n"
+                    "forge_agent_cpu_used %.2f\n"
+                    "# HELP forge_agent_memory_used_bytes Memory used on the worker.\n"
+                    "# TYPE forge_agent_memory_used_bytes gauge\n"
+                    "forge_agent_memory_used_bytes %ld\n"
+                    "# HELP forge_agent_memory_capacity_bytes Memory capacity on the worker.\n"
+                    "# TYPE forge_agent_memory_capacity_bytes gauge\n"
+                    "forge_agent_memory_capacity_bytes %ld\n"
+                    "# HELP forge_agent_processes Running app processes launched by the agent.\n"
+                    "# TYPE forge_agent_processes gauge\n"
+                    "forge_agent_processes %d\n"
+                    "# HELP forge_agent_last_heartbeat_seconds Last heartbeat unix timestamp.\n"
+                    "# TYPE forge_agent_last_heartbeat_seconds gauge\n"
+                    "forge_agent_last_heartbeat_seconds %ld\n",
+                    cpu_used,
+                    memory_used,
+                    memory_cap,
+                    processes,
+                    (long)last);
+        int body_len = body ? (int)strlen(body) : 0;
         char header[256];
         int header_len = snprintf(header, sizeof(header),
                                   "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
@@ -1300,9 +1300,13 @@ static void *metrics_server_thread(void *arg) {
             close(client);
             continue;
         }
-        if (write(client, body, (size_t)body_len) < 0) {
-            close(client);
-            continue;
+        if (body_len > 0) {
+            if (write(client, body, (size_t)body_len) < 0) {
+                free(body);
+                close(client);
+                continue;
+            }
+            free(body);
         }
         close(client);
     }

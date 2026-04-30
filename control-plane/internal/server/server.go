@@ -1157,9 +1157,7 @@ func (s *Server) repoCloneURL(payload githubPushPayload) (string, error) {
 		if repoURL == "" {
 			return "", fmt.Errorf("local repository reference rejected")
 		}
-		if strings.HasPrefix(repoURL, "file://") {
-			repoURL = strings.TrimPrefix(repoURL, "file://")
-		}
+		repoURL = strings.TrimPrefix(repoURL, "file://")
 		if !filepath.IsAbs(repoURL) {
 			return "", fmt.Errorf("local repository reference rejected")
 		}

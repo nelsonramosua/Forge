@@ -1,0 +1,75 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    # --- correctness ---
+    - errcheck          # unchecked errors
+    - govet             # go vet passes
+    - staticcheck       # SA*, S1*, QF* — the big one
+    - ineffassign       # assignment result never used
+    - unused            # unused code (replaces deadcode/structcheck/varcheck)
+
+    # --- security ---
+    - gosec             # G2xx injection, G4xx crypto, etc.
+
+    # --- style / bugs ---
+    - gocritic          # opinionated but useful
+    - noctx             # http requests without context
+    - bodyclose         # http response body left open
+    - sqlcloserows      # sql.Rows not closed
+    - rowserrcheck      # sql.Rows.Err() not checked
+    - durationcheck     # time.Duration arithmetic bugs
+    - exportloopref     # loop variable captured by reference (pre-Go 1.22)
+    - makezero          # slice created with non-zero length and appended to
+    - nilerr            # return nil instead of err
+    - exhaustive        # missing switch cases on enums
+    - whitespace        # unnecessary blank lines
+
+    # --- performance ---
+    - prealloc          # slice preallocation hints
+
+linters-settings:
+  gosec:
+    excludes:
+      # G304 is "file path from variable" — intentional in forge (git clone paths)
+      - G304
+    config:
+      global:
+        audit: true
+
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - performance
+    disabled-checks:
+      - hugeParam         # too noisy for this codebase size
+      - rangeValCopy
+
+  staticcheck:
+    checks:
+      - "all"
+      - "-ST1000"   # package comment — not enforced
+      - "-ST1003"   # name convention — too opinionated for existing code
+
+  exhaustive:
+    default-signifies-exhaustive: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+  exclude-rules:
+    # Test files get a more relaxed set
+    - path: "_test\\.go"
+      linters:
+        - gosec
+        - errcheck
+
+    # Generated / vendor code
+    - path: "vendor/"
+      linters: [all]

@@ -317,7 +317,7 @@ func (s *Store) ClaimNextTask(ctx context.Context, agentID string) (*Task, error
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	row := tx.QueryRowContext(ctx, `SELECT * FROM tasks WHERE agent_id=? AND status='pending' ORDER BY created_at ASC LIMIT 1;`, agentID)
 	task, err := scanTask(row)
