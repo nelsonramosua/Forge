@@ -71,9 +71,6 @@ jobs:
             echo "Tabela DynamoDB ${TABLE_NAME} já existe."
           fi
 
-          echo "TERRAFORM_BACKEND_BUCKET=forge-terraform-state-${ACCOUNT_ID}" >> "$GITHUB_ENV"
-          echo "TERRAFORM_BACKEND_REGION=${{ secrets.AWS_REGION }}" >> "$GITHUB_ENV"
-
       - name: Write tfvars
         run: |
           cat > infra/terraform/aws/terraform.tfvars << EOF
@@ -86,10 +83,11 @@ jobs:
 
       - name: Create backend config for S3
         run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           cat > infra/terraform/aws/backend-config.tfvars << EOF
-          bucket         = "${{ env.TERRAFORM_BACKEND_BUCKET }}"
+          bucket         = "forge-terraform-state-${ACCOUNT_ID}"
           key            = "aws/terraform.tfstate"
-          region         = "${{ env.TERRAFORM_BACKEND_REGION }}"
+          region         = "${{ secrets.AWS_REGION }}"
           encrypt        = true
           dynamodb_table = "terraform-locks"
           EOF
