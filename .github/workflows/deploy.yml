@@ -35,7 +35,7 @@ permissions:
 
 jobs:
   deploy:
-    name: Deploy to ${{ inputs.target || 'control-plane' }}
+    name: Deploy to ${{ inputs.target || 'all' }}
     runs-on: ubuntu-latest
     if: >-
       ${{
@@ -52,11 +52,11 @@ jobs:
     environment: production
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -71,7 +71,7 @@ jobs:
         env:
           AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
@@ -238,7 +238,7 @@ jobs:
       - name: Determine Ansible limit
         id: limit
         run: |
-          TARGET="${{ inputs.target || 'control-plane' }}"
+          TARGET="${{ inputs.target || 'all' }}"
           case "$TARGET" in
             control-plane) echo "limit=control_plane" >> "$GITHUB_OUTPUT" ;;
             workers)        echo "limit=workers"        >> "$GITHUB_OUTPUT" ;;
@@ -273,7 +273,7 @@ jobs:
           sleep 10
           status=$(curl -sf --max-time 10 \
             -H "Authorization: Bearer ${{ secrets.FORGE_ADMIN_TOKEN }}" \
-            "https://${{ secrets.FORGE_BASE_DOMAIN }}/api/v1/agents" \
+            "https://${{ secrets.FORGE_BASE_DOMAIN }}/api/v1/deployments" \
             -o /dev/null -w "%{http_code}" || echo "000")
           echo "HTTP status: $status"
           if [[ "$status" != "200" ]]; then
