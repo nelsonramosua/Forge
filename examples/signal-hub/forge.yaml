@@ -1,5 +1,5 @@
 name: signal-hub
-runtime: go1.21
+runtime: go1.25
 build:
   commands:
     - go build -o signal-hub .
