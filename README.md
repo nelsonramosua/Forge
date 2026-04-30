@@ -89,7 +89,7 @@ GitHub
 Perhaps easier to visalizer with a mermaid diagram:
 
 ```mermaid
-%%{init: { "theme": "default", "themeCSS": "svg { background-color: #c29b9b; }" }}%%
+%%{init: { "theme": "default" }}%%
 
 flowchart TD
     GH["GitHub\npush webhook - HMAC-SHA256"]

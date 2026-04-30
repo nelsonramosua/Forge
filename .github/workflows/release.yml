@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -23,17 +25,54 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build binaries
-        run: make build
+      - name: Fetch tags
+        run: git fetch --tags --force
+
+      - name: Build and test
+        run: make test
+
+      - name: Capture release metadata
+        id: meta
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          previous_tag="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          if [[ -z "$previous_tag" ]]; then
+            previous_tag="$(git rev-list --max-parents=0 HEAD | tail -n1)"
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'previous_tag=%s\n' "$previous_tag" >> "$GITHUB_OUTPUT"
 
       - name: Package release artifacts
         run: |
-          tar -czf forge-linux-amd64.tar.gz -C bin forge-control-plane forge-exporter forge-agent forge-build-runner
-          sha256sum forge-linux-amd64.tar.gz > forge-linux-amd64.tar.gz.sha256
+          version="${{ steps.meta.outputs.version }}"
+          release_dir="dist/forge-${version}-linux-amd64"
+          mkdir -p "$release_dir"
+          cp README.md "$release_dir/"
+          cp examples/README.md "$release_dir/examples-README.md"
+          cp bin/forge-control-plane bin/forge-exporter bin/forge-agent bin/forge-build-runner "$release_dir/"
+          tar -C dist -czf "dist/forge-${version}-linux-amd64.tar.gz" "forge-${version}-linux-amd64"
+          git archive --format=tar.gz --prefix="forge-${version}/" --output="dist/forge-${version}-source.tar.gz" "${GITHUB_REF_NAME}"
+          sha256sum "dist/forge-${version}-linux-amd64.tar.gz" "dist/forge-${version}-source.tar.gz" > "dist/forge-${version}-checksums.txt"
+
+      - name: Generate release notes
+        run: |
+          version="${{ steps.meta.outputs.version }}"
+          previous_tag="${{ steps.meta.outputs.previous_tag }}"
+          {
+            echo "# Forge ${version}"
+            echo
+            echo "Built from \\`${GITHUB_SHA}\\`."
+            echo
+            echo "## Changes since ${previous_tag}"
+            echo
+            git log --no-merges --pretty=format:'- %s' "${previous_tag}..${GITHUB_REF_NAME}" | head -n 50
+          } > dist/release-notes.md
 
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
         with:
+          body_path: dist/release-notes.md
           files: |
-            forge-linux-amd64.tar.gz
-            forge-linux-amd64.tar.gz.sha256
+            dist/forge-${{ steps.meta.outputs.version }}-linux-amd64.tar.gz
+            dist/forge-${{ steps.meta.outputs.version }}-source.tar.gz
+            dist/forge-${{ steps.meta.outputs.version }}-checksums.txt
