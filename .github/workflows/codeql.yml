@@ -1,0 +1,89 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**.go"
+      - "**.c"
+      - "**.h"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/codeql.yml"
+  pull_request:
+    paths:
+      - "**.go"
+      - "**.c"
+      - "**.h"
+      - "go.mod"
+      - "go.sum"
+  # Weekly scan, independent of pushes - catches new CVEs in existing code.
+  schedule:
+    - cron: "0 3 * * 1"   # monday at 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false   # analyze both languages even if one fails
+      matrix:
+        include:
+          - language: go
+            build-mode: autobuild
+          - language: c-cpp
+            build-mode: manual   # C requires manual build for the tracer to capture compilation
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install C build deps
+        if: matrix.language == 'c-cpp'
+        run: sudo apt-get install -y --no-install-recommends gcc
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # security-extended catches: SQL injection, path traversal, buffer overflows,
+          # use-after-free, format string bugs, integer overflow, etc.
+          queries: security-extended,security-and-quality
+          config: |
+            paths-ignore:
+              - "**/*_test.go"
+              - "**/testdata/**"
+
+      # Go: autobuild handles this automatically.
+      # C: manual build with the same flags as the Makefile so the tracer sees everything.
+      - name: Build C sources (manual trace)
+        if: matrix.language == 'c-cpp'
+        run: |
+          gcc -std=c11 -Wall -Wextra -O2 -pthread \
+              -o /tmp/forge-agent \
+              agent/src/forge_agent.c \
+              agent/src/json_parser.c
+
+          gcc -std=c11 -Wall -Wextra -O2 \
+              -o /tmp/forge-build-runner \
+              build-runner/src/forge_build_runner.c
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: codeql-${{ matrix.language }}
+          upload: always

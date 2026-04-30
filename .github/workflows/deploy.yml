@@ -1,0 +1,181 @@
+name: Deploy
+
+on:
+  # Manual deploy with target and options selection
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Deploy target"
+        required: true
+        type: choice
+        options:
+          - control-plane
+          - workers
+          - all
+        default: all
+      ansible_check:
+        description: "Dry-run only (--check)"
+        required: false
+        type: boolean
+        default: false
+      skip_ci:
+        description: "Skip CI gate (not recommended)"
+        required: false
+        type: boolean
+        default: false
+
+  # Automatic deploy on push to main — control-plane only by default
+  push:
+    branches: [main]
+    paths:
+      - "control-plane/**"
+      - "agent/**"
+      - "build-runner/**"
+      - "cmd/**"
+      - "infra/ansible/**"
+      - "Makefile"
+      - "go.mod"
+      - "go.sum"
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false   # never cancel a deploy in progress
+
+permissions:
+  contents: read
+
+jobs:
+  # ── 1. Gate: CI must be green before any deploy ────────────────
+  ci-gate:
+    name: CI gate
+    if: ${{ !inputs.skip_ci }}
+    uses: ./.github/workflows/ci.yml
+
+  # ── 2. Deploy ───────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy → ${{ inputs.target || 'control-plane' }}
+    runs-on: ubuntu-latest
+    needs: [ci-gate]
+    # Allow running even when ci-gate is skipped (skip_ci=true)
+    if: always() && (needs.ci-gate.result == 'success' || needs.ci-gate.result == 'skipped')
+
+    # Environment with protection rules — configure at:
+    # Settings → Environments → production → Required reviewers
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Ansible
+        run: |
+          pip install --quiet \
+            ansible==10.6.0 \
+            ansible-lint==24.9.2
+
+      - name: Write SSH private key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.FORGE_SSH_PRIVATE_KEY }}" > ~/.ssh/forge_deploy
+          chmod 600 ~/.ssh/forge_deploy
+          # Accept AWS host key without prompt
+          ssh-keyscan -H "${{ secrets.FORGE_CONTROL_PLANE_IP }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh-keyscan -H "${{ secrets.FORGE_WORKER_IP }}"        >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Write Ansible inventory
+        run: |
+          cat > infra/ansible/inventory.ini << EOF
+          [control_plane]
+          control-plane ansible_host=${{ secrets.FORGE_CONTROL_PLANE_IP }} \
+            ansible_user=ubuntu \
+            ansible_ssh_private_key_file=~/.ssh/forge_deploy \
+            ansible_ssh_common_args='-o StrictHostKeyChecking=yes' \
+            forge_base_domain=${{ secrets.FORGE_BASE_DOMAIN }} \
+            forge_control_plane_private_ip=${{ secrets.FORGE_CONTROL_PLANE_PRIVATE_IP }}
+
+          [workers]
+          worker ansible_host=${{ secrets.FORGE_WORKER_IP }} \
+            ansible_user=ubuntu \
+            ansible_ssh_private_key_file=~/.ssh/forge_deploy \
+            ansible_ssh_common_args='-o ProxyJump=ubuntu@${{ secrets.FORGE_CONTROL_PLANE_IP }} -o StrictHostKeyChecking=yes' \
+            forge_control_plane_private_ip=${{ secrets.FORGE_CONTROL_PLANE_PRIVATE_IP }}
+          EOF
+
+      - name: Write Ansible Vault password
+        run: |
+          echo "${{ secrets.ANSIBLE_VAULT_PASSWORD }}" > ~/.vault_pass
+          chmod 600 ~/.vault_pass
+
+      - name: Write Ansible Vault file (group_vars)
+        run: |
+          # The real vault.yml is generated from GitHub Secrets to avoid
+          # storing encrypted files in the repo that depend on a rotated password.
+          # If you prefer to manage vault.yml in the repo, remove this step and use --vault-password-file.
+          mkdir -p infra/ansible/group_vars/all
+          cat > infra/ansible/group_vars/all/vault.yml << EOF
+          vault_forge_master_key: "${{ secrets.FORGE_MASTER_KEY }}"
+          vault_forge_agent_token: "${{ secrets.FORGE_AGENT_TOKEN }}"
+          vault_forge_admin_token: "${{ secrets.FORGE_ADMIN_TOKEN }}"
+          vault_forge_github_webhook_secret: "${{ secrets.FORGE_GITHUB_WEBHOOK_SECRET }}"
+          forge_allowed_repos:
+            - ${{ secrets.FORGE_ALLOWED_REPOS }}
+          vault_grafana_admin_password: "${{ secrets.GRAFANA_ADMIN_PASSWORD }}"
+          EOF
+
+      - name: Determine Ansible limit
+        id: limit
+        run: |
+          TARGET="${{ inputs.target || 'control-plane' }}"
+          case "$TARGET" in
+            control-plane) echo "limit=control_plane" >> "$GITHUB_OUTPUT" ;;
+            workers)        echo "limit=workers"        >> "$GITHUB_OUTPUT" ;;
+            all)            echo "limit=all"            >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Ansible syntax check
+        run: |
+          ansible-playbook \
+            -i infra/ansible/inventory.ini \
+            --limit "${{ steps.limit.outputs.limit }}" \
+            --syntax-check \
+            infra/ansible/playbook.yml
+
+      - name: Run Ansible playbook${{ inputs.ansible_check && ' (--check)' || '' }}
+        run: |
+          ansible-playbook \
+            -i infra/ansible/inventory.ini \
+            --limit "${{ steps.limit.outputs.limit }}" \
+            ${{ inputs.ansible_check && '--check --diff' || '' }} \
+            infra/ansible/playbook.yml
+        env:
+          ANSIBLE_FORCE_COLOR: "1"
+          ANSIBLE_HOST_KEY_CHECKING: "True"
+          # Prevent Ansible output from appearing in GitHub logs in plaintext
+          ANSIBLE_DISPLAY_SKIPPED_HOSTS: "false"
+
+      - name: Smoke check — control plane health
+        if: ${{ !inputs.ansible_check && (inputs.target == 'control-plane' || inputs.target == 'all' || inputs.target == '') }}
+        run: |
+          echo "Wait 10s for service to stabilize..."
+          sleep 10
+          status=$(curl -sf --max-time 10 \
+            -H "Authorization: Bearer ${{ secrets.FORGE_ADMIN_TOKEN }}" \
+            "https://${{ secrets.FORGE_BASE_DOMAIN }}/api/v1/agents" \
+            -o /dev/null -w "%{http_code}" || echo "000")
+          echo "HTTP status: $status"
+          if [[ "$status" != "200" ]]; then
+            echo "::error::Control plane did not respond after deploy (HTTP $status)"
+            exit 1
+          fi
+          echo "Control plane OK."
+
+      - name: Cleanup credentials
+        if: always()
+        run: |
+          rm -f ~/.ssh/forge_deploy ~/.vault_pass
+          rm -f infra/ansible/group_vars/all/vault.yml
+          rm -f infra/ansible/inventory.ini

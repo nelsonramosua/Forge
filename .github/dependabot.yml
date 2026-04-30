@@ -1,0 +1,45 @@
+version: 2
+
+updates:
+  # GitHub Actions — keep all actions updated
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: Europe/Lisbon
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns: ["*"]
+    labels:
+      - dependencies
+      - ci
+
+  # Go modules — control-plane + exporter
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: Europe/Lisbon
+    commit-message:
+      prefix: "deps"
+    # Group all minor/patch updates in a single PR
+    groups:
+      go-deps:
+        update-types:
+          - minor
+          - patch
+    # Major updates come in separate PRs for explicit review
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+    # Ignore pre-releases
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
