@@ -1,7 +1,7 @@
 name: Deploy
 
 on:
-  # Manual deploy with target and options selection
+  # Manual deploy with target and options selection.
   workflow_dispatch:
     inputs:
       target:
@@ -18,24 +18,12 @@ on:
         required: false
         type: boolean
         default: false
-      skip_ci:
-        description: "Skip CI gate (not recommended)"
-        required: false
-        type: boolean
-        default: false
 
-  # Automatic deploy on push to main — control-plane only by default
-  push:
+  # Automatic deploy after the normal CI workflow passes on main.
+  workflow_run:
+    workflows: ["CI"]
     branches: [main]
-    paths:
-      - "control-plane/**"
-      - "agent/**"
-      - "build-runner/**"
-      - "cmd/**"
-      - "infra/ansible/**"
-      - "Makefile"
-      - "go.mod"
-      - "go.sum"
+    types: [completed]
 
 concurrency:
   group: deploy-production
@@ -45,22 +33,18 @@ permissions:
   contents: read
 
 jobs:
-  # ── 1. Gate: CI must be green before any deploy ────────────────
-  ci-gate:
-    name: CI gate
-    if: ${{ !inputs.skip_ci }}
-    permissions:
-      contents: read
-      security-events: write
-    uses: ./.github/workflows/ci.yml
-
-  # ── 2. Deploy ───────────────────────────────────────────────────────────────
   deploy:
     name: Deploy → ${{ inputs.target || 'control-plane' }}
     runs-on: ubuntu-latest
-    needs: [ci-gate]
-    # Allow running even when ci-gate is skipped (skip_ci=true)
-    if: always() && (needs.ci-gate.result == 'success' || needs.ci-gate.result == 'skipped')
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push'
+        )
+      }}
 
     # Environment with protection rules — configure at:
     # Settings → Environments → production → Required reviewers
@@ -68,6 +52,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - uses: actions/setup-go@v5
         with:
@@ -85,9 +71,12 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.FORGE_SSH_PRIVATE_KEY }}" > ~/.ssh/forge_deploy
           chmod 600 ~/.ssh/forge_deploy
-          # Accept AWS host key without prompt
-          ssh-keyscan -H "${{ secrets.FORGE_CONTROL_PLANE_IP }}" >> ~/.ssh/known_hosts 2>/dev/null || true
-          ssh-keyscan -H "${{ secrets.FORGE_WORKER_IP }}"        >> ~/.ssh/known_hosts 2>/dev/null || true
+          control_host="${{ secrets.FORGE_CONTROL_PLANE_IP }}"
+          if ! ssh-keyscan -T 10 -H "${control_host}" >> ~/.ssh/known_hosts 2>/dev/null; then
+            echo "::error::Cannot reach control-plane SSH at FORGE_CONTROL_PLANE_IP:22. Check the secret value, instance state, and the AWS admin_cidr/security group. GitHub-hosted runners need SSH ingress or deploy must run from a reachable self-hosted runner/VPN."
+            exit 1
+          fi
+          ssh-keyscan -T 10 -H "${{ secrets.FORGE_WORKER_IP }}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Write Ansible inventory
         run: |
@@ -96,7 +85,7 @@ jobs:
           control-plane ansible_host=${{ secrets.FORGE_CONTROL_PLANE_IP }} \
             ansible_user=ubuntu \
             ansible_ssh_private_key_file=~/.ssh/forge_deploy \
-            ansible_ssh_common_args='-o StrictHostKeyChecking=yes' \
+            ansible_ssh_common_args='-o StrictHostKeyChecking=yes -o ConnectTimeout=15' \
             forge_base_domain=${{ secrets.FORGE_BASE_DOMAIN }} \
             forge_control_plane_private_ip=${{ secrets.FORGE_CONTROL_PLANE_PRIVATE_IP }}
 
@@ -104,7 +93,7 @@ jobs:
           worker ansible_host=${{ secrets.FORGE_WORKER_IP }} \
             ansible_user=ubuntu \
             ansible_ssh_private_key_file=~/.ssh/forge_deploy \
-            ansible_ssh_common_args='-o ProxyJump=ubuntu@${{ secrets.FORGE_CONTROL_PLANE_IP }} -o StrictHostKeyChecking=yes' \
+            ansible_ssh_common_args='-o ProxyJump=ubuntu@${{ secrets.FORGE_CONTROL_PLANE_IP }} -o StrictHostKeyChecking=yes -o ConnectTimeout=15' \
             forge_control_plane_private_ip=${{ secrets.FORGE_CONTROL_PLANE_PRIVATE_IP }}
           EOF
 
