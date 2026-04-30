@@ -1,9 +1,10 @@
+version: "2"
+
 run:
   timeout: 5m
   tests: true
 
 linters:
-  disable-all: true
   enable:
     # --- correctness ---
     - errcheck          # unchecked errors
@@ -19,10 +20,10 @@ linters:
     - gocritic          # opinionated but useful
     - noctx             # http requests without context
     - bodyclose         # http response body left open
-    - sqlcloserows      # sql.Rows not closed
+    - sqlclosecheck     # sql.Rows not closed
     - rowserrcheck      # sql.Rows.Err() not checked
     - durationcheck     # time.Duration arithmetic bugs
-    - exportloopref     # loop variable captured by reference (pre-Go 1.22)
+    - copyloopvar       # loop variable captured by reference (Go < 1.22)
     - makezero          # slice created with non-zero length and appended to
     - nilerr            # return nil instead of err
     - exhaustive        # missing switch cases on enums
@@ -31,43 +32,41 @@ linters:
     # --- performance ---
     - prealloc          # slice preallocation hints
 
-linters-settings:
-  gosec:
-    excludes:
-      # G304 is "file path from variable" — intentional in forge (git clone paths)
-      - G304
-    config:
-      global:
-        audit: true
+  settings:
+    gosec:
+      excludes:
+        # G304 is "file path from variable" — intentional in forge (git clone paths)
+        - G304
 
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - performance
-    disabled-checks:
-      - hugeParam         # too noisy for this codebase size
-      - rangeValCopy
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        - hugeParam         # too noisy for this codebase size
+        - rangeValCopy
 
-  staticcheck:
-    checks:
-      - "all"
-      - "-ST1000"   # package comment — not enforced
-      - "-ST1003"   # name convention — too opinionated for existing code
+    staticcheck:
+      checks:
+        - "all"
+        - "-ST1000"   # package comment — not enforced
+        - "-ST1003"   # name convention — too opinionated for existing code
 
-  exhaustive:
-    default-signifies-exhaustive: true
+    exhaustive:
+      default-signifies-exhaustive: true
+
+  exclusions:
+    rules:
+      # Test files get a more relaxed set
+      - path: "_test\\.go"
+        linters:
+          - gosec
+          - errcheck
+
+      # Generated / vendor code
+      - path: "vendor/"
+        linters: [all]
 
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-
-  exclude-rules:
-    # Test files get a more relaxed set
-    - path: "_test\\.go"
-      linters:
-        - gosec
-        - errcheck
-
-    # Generated / vendor code
-    - path: "vendor/"
-      linters: [all]
