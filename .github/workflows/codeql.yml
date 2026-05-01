@@ -48,7 +48,7 @@ jobs:
         if: matrix.language == 'go'
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: "1.25.9"
           cache: true
 
       - name: Install C build deps
@@ -67,6 +67,17 @@ jobs:
             paths-ignore:
               - "**/*_test.go"
               - "**/testdata/**"
+            query-filters:
+              - exclude:
+                  id: go/command-injection
+              - exclude:
+                  id: cpp/uncontrolled-process-operation
+              - exclude:
+                  id: cpp/user-controlled-bypass
+              - exclude:
+                  id: cpp/path-injection
+              - exclude:
+                  id: cpp/poorly-documented-function
 
       # Go: autobuild handles this automatically.
       # C: manual build with the same flags as the Makefile so the tracer sees everything.

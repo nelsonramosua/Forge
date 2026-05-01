@@ -348,14 +348,14 @@ static bool safe_repo_url(const char *value) {
     return path_under_base(value, "/tmp");
 }
 
-static bool safe_runner_path(const char *path) {
-    if (strcmp(path, "/usr/local/bin/forge-build-runner") == 0 || strcmp(path, "./bin/forge-build-runner") == 0) {
-        return true;
+static const char *validated_runner_path(const char *path) {
+    if (strcmp(path, "/usr/local/bin/forge-build-runner") == 0) {
+        return "/usr/local/bin/forge-build-runner";
     }
-    const char *suffix = "/bin/forge-build-runner";
-    size_t path_len = strlen(path);
-    size_t suffix_len = strlen(suffix);
-    return path_len > suffix_len && path[0] == '/' && !path_has_traversal(path) && strcmp(path + path_len - suffix_len, suffix) == 0;
+    if (strcmp(path, "./bin/forge-build-runner") == 0) {
+        return "./bin/forge-build-runner";
+    }
+    return NULL;
 }
 
 static bool task_security_valid(const struct agent_config *cfg, const struct task *task) {
@@ -772,10 +772,14 @@ static int run_capture(const struct agent_config *cfg, long task_id, enum captur
         if (program == CAPTURE_GIT) {
             execvp("git", argv);
             fprintf(stderr, "execvp(git): %s\n", strerror(errno));
-        } else if (program == CAPTURE_RUNNER && safe_runner_path(cfg->runner_path)) {
-            // codeql[cpp/uncontrolled-process-operation]
-            execv(cfg->runner_path, argv);
-            fprintf(stderr, "execv(%s): %s\n", cfg->runner_path, strerror(errno));
+        } else if (program == CAPTURE_RUNNER) {
+            const char *runner_path = validated_runner_path(cfg->runner_path);
+            if (runner_path) {
+                execv(runner_path, argv);
+                fprintf(stderr, "execv(%s): %s\n", runner_path, strerror(errno));
+            } else {
+                fprintf(stderr, "forge-agent: invalid runner path\n");
+            }
         } else {
             fprintf(stderr, "forge-agent: invalid capture program\n");
         }

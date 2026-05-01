@@ -1132,12 +1132,17 @@ func isSafeBranchName(value string) bool {
 }
 
 func (s *Server) repoAllowed(fullName string) bool {
+	_, ok := s.allowedRepoName(fullName)
+	return ok
+}
+
+func (s *Server) allowedRepoName(fullName string) (string, bool) {
 	for _, allowed := range s.cfg.AllowedRepos {
 		if strings.EqualFold(allowed, fullName) {
-			return true
+			return allowed, true
 		}
 	}
-	return false
+	return "", false
 }
 
 func (s *Server) branchAllowed(branch string) bool {
@@ -1172,7 +1177,11 @@ func (s *Server) repoCloneURL(payload githubPushPayload) (string, error) {
 	if !validRepoName(payload.Repository.FullName) {
 		return "", fmt.Errorf("invalid repository full_name")
 	}
-	return "https://github.com/" + payload.Repository.FullName + ".git", nil
+	allowedRepo, ok := s.allowedRepoName(payload.Repository.FullName)
+	if !ok {
+		return "", fmt.Errorf("repository is not allowed")
+	}
+	return "https://github.com/" + allowedRepo + ".git", nil
 }
 
 func sanitizeHost(value string) string {
