@@ -131,4 +131,4 @@ The script requires cgroups v2 to be available and mounted at `/sys/fs/cgroup`. 
 
 Do not open a public issue for vulnerabilities that are exploitable against a running Forge instance. Use GitHub's [private vulnerability reporting](../../security/advisories/new) instead.
 
-For lower-severity findings (hardening gaps, information disclosure, dependency advisories), the [security issue template](../../issues/new?template=security.md) is appropriate.
+For lower-severity findings (hardening gaps, information disclosure, dependency advisories), the [security issue template](../../issues/new?template=security.yml) is appropriate.

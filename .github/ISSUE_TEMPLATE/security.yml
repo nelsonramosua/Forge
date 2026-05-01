@@ -1,0 +1,62 @@
+name: Security vulnerability
+description: Report a lower-severity security issue suitable for public discussion.
+title: "[Security]: "
+labels:
+  - security
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include exploit details, credentials, or sensitive reproduction steps
+        in a public issue.
+
+        If the vulnerability is exploitable against a running Forge instance, such as
+        auth bypass, SSRF, RCE, or secret disclosure, use private vulnerability
+        reporting instead:
+        https://github.com/nelsonramosua/Forge/security/advisories/new
+
+        Use this template only for lower-severity findings where public discussion is safe.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the issue without including exploit details.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      options:
+        - control-plane
+        - forge-agent
+        - forge-build-runner
+        - Terraform infra
+        - Ansible
+        - documentation
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: severity
+    attributes:
+      label: Severity assessment
+      description: Include impact, exploitability, and CVSS score if known.
+      placeholder: |
+        CVSS score:
+        Requires authenticated access:
+        Requires non-default config:
+    validations:
+      required: true
+
+  - type: textarea
+    id: mitigation
+    attributes:
+      label: Suggested mitigation
+      description: If you have a fix or workaround in mind, describe it here.
+    validations:
+      required: false
+

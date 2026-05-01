@@ -69,7 +69,7 @@ security:
   - changed-files:
       - any-glob-to-any-file:
           - ".github/SECURITY.md"
-          - ".github/ISSUE_TEMPLATE/security.md"
+          - ".github/ISSUE_TEMPLATE/security.yml"
           - ".github/workflows/codeql.yml"
           - "agent/**"
           - "build-runner/**"
