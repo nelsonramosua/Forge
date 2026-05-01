@@ -1,17 +1,23 @@
 - name: Determine Go download architecture
   ansible.builtin.set_fact:
     forge_go_arch: "{{ forge_go_arch_map[ansible_architecture] | default('') }}"
+    forge_go_checksum: "{{ forge_go_checksum_map.get(forge_go_version, {}).get(forge_go_arch_map[ansible_architecture] | default(''), '') }}"
   vars:
     forge_go_arch_map:
       x86_64: amd64
       aarch64: arm64
       arm64: arm64
+    forge_go_checksum_map:
+      "1.25.9":
+        amd64: 00859d7bd6defe8bf84d9db9e57b9a4467b2887c18cd93ae7460e713db774bc1
+        arm64: ec342e7389b7f489564ed5463c63b16cf8040023dabc7861256677165a8c0e2b
 
 - name: Validate Go download architecture
   ansible.builtin.assert:
     that:
       - forge_go_arch in ['amd64', 'arm64']
-    fail_msg: "Unsupported architecture for Go download: {{ ansible_architecture }}"
+      - forge_go_checksum | length == 64
+    fail_msg: "Unsupported Go download for {{ forge_go_version }} on {{ ansible_architecture }}"
 
 - name: Check installed Go toolchain
   ansible.builtin.command:
@@ -24,7 +30,7 @@
   ansible.builtin.get_url:
     url: "https://go.dev/dl/go{{ forge_go_version }}.linux-{{ forge_go_arch }}.tar.gz"
     dest: "/tmp/go{{ forge_go_version }}.linux-{{ forge_go_arch }}.tar.gz"
-    checksum: "sha256:https://go.dev/dl/go{{ forge_go_version }}.linux-{{ forge_go_arch }}.tar.gz.sha256"
+    checksum: "sha256:{{ forge_go_checksum }}"
     mode: "0644"
   when: "'go' ~ forge_go_version not in forge_go_version_check.stdout"
 
