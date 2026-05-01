@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -10,7 +11,18 @@ import (
 	"time"
 )
 
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildTime = "unknown"
+)
+
 func main() {
+	if wantsVersion(os.Args) {
+		fmt.Printf("forge-exporter %s (commit %s, built %s)\n", version, commit, buildTime)
+		return
+	}
+
 	addr := env("FORGE_EXPORTER_ADDR", ":9108")
 	socket := env("FORGE_AGENT_METRICS_SOCKET", "/tmp/forge-agent-metrics.sock")
 	mux := http.NewServeMux()
@@ -63,4 +75,11 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func wantsVersion(args []string) bool {
+	if len(args) != 2 {
+		return false
+	}
+	return args[1] == "--version" || args[1] == "-version" || args[1] == "version"
 }

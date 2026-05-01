@@ -106,8 +106,8 @@ jobs:
       - name: Verify binaries run
         run: |
           file bin/forge-control-plane bin/forge-exporter bin/forge-agent bin/forge-build-runner
-          ./bin/forge-control-plane --version 2>/dev/null || true
-          ./bin/forge-exporter --version 2>/dev/null || true
+          timeout 5s ./bin/forge-control-plane --version
+          timeout 5s ./bin/forge-exporter --version
 
       - name: Package tarball
         run: |
@@ -213,6 +213,6 @@ jobs:
           sha256sum --check "${ARCHIVE}.sha256"
 
           tar -xzf "$ARCHIVE"
-          ./forge-control-plane --version 2>/dev/null || true
-          ./forge-exporter --version 2>/dev/null || true
+          timeout 5s ./forge-control-plane --version
+          timeout 5s ./forge-exporter --version
           file forge-agent forge-build-runner

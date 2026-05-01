@@ -278,6 +278,10 @@ env:                      # secret keys to inject; values stored encrypted in va
 make build
 make test
 
+# Check release metadata for Go binaries
+./bin/forge-control-plane --version
+./bin/forge-exporter --version
+
 # Generate credentials
 export FORGE_MASTER_KEY="$(openssl rand -base64 32)"
 export FORGE_AGENT_TOKEN="$(openssl rand -hex 32)"
