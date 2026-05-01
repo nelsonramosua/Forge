@@ -1,0 +1,51 @@
+- name: Determine Go download architecture
+  ansible.builtin.set_fact:
+    forge_go_arch: "{{ forge_go_arch_map[ansible_architecture] | default('') }}"
+  vars:
+    forge_go_arch_map:
+      x86_64: amd64
+      aarch64: arm64
+      arm64: arm64
+
+- name: Validate Go download architecture
+  ansible.builtin.assert:
+    that:
+      - forge_go_arch in ['amd64', 'arm64']
+    fail_msg: "Unsupported architecture for Go download: {{ ansible_architecture }}"
+
+- name: Check installed Go toolchain
+  ansible.builtin.command:
+    cmd: "{{ forge_go_root }}/bin/go version"
+  register: forge_go_version_check
+  changed_when: false
+  failed_when: false
+
+- name: Download Go toolchain
+  ansible.builtin.get_url:
+    url: "https://go.dev/dl/go{{ forge_go_version }}.linux-{{ forge_go_arch }}.tar.gz"
+    dest: "/tmp/go{{ forge_go_version }}.linux-{{ forge_go_arch }}.tar.gz"
+    checksum: "sha256:https://go.dev/dl/go{{ forge_go_version }}.linux-{{ forge_go_arch }}.tar.gz.sha256"
+    mode: "0644"
+  when: "'go' ~ forge_go_version not in forge_go_version_check.stdout"
+
+- name: Remove previous Go toolchain
+  ansible.builtin.file:
+    path: "{{ forge_go_root }}"
+    state: absent
+  when: "'go' ~ forge_go_version not in forge_go_version_check.stdout"
+
+- name: Install Go toolchain
+  ansible.builtin.unarchive:
+    src: "/tmp/go{{ forge_go_version }}.linux-{{ forge_go_arch }}.tar.gz"
+    dest: /usr/local
+    remote_src: true
+    owner: root
+    group: root
+  when: "'go' ~ forge_go_version not in forge_go_version_check.stdout"
+
+- name: Verify Go toolchain
+  ansible.builtin.command:
+    cmd: "{{ forge_go_root }}/bin/go version"
+  register: forge_go_installed
+  changed_when: false
+  failed_when: "'go' ~ forge_go_version not in forge_go_installed.stdout"

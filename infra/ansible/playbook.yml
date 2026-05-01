@@ -4,6 +4,8 @@
   vars:
     forge_user: forge
     forge_source_dir: /opt/forge-src
+    forge_go_version: "1.25.9"
+    forge_go_root: /usr/local/go
     forge_base_domain: "{{ hostvars[inventory_hostname].forge_base_domain }}"
     forge_control_plane_private_ip: "{{ hostvars[inventory_hostname].forge_control_plane_private_ip }}"
   tasks:
@@ -18,7 +20,6 @@
           - gcc
           - git
           - gnupg
-          - golang-go
           - make
           - prometheus
           - prometheus-alertmanager
@@ -104,6 +105,9 @@
         state: present
         update_cache: true
 
+    - name: Install Go toolchain
+      ansible.builtin.include_tasks: tasks/install-go.yml
+
     - name: Create forge user
       ansible.builtin.user:
         name: "{{ forge_user }}"
@@ -156,16 +160,20 @@
         owner: root
         group: root
 
-    - name: Build Forge binaries on ARM64 host
+    - name: Build Forge binaries on remote host
       ansible.builtin.command:
-        cmd: make clean build
+        cmd: make clean build GO={{ forge_go_root }}/bin/go
         chdir: "{{ forge_source_dir }}"
+      environment:
+        GOTOOLCHAIN: local
       changed_when: true
 
     - name: Install Forge binaries
       ansible.builtin.command:
-        cmd: make install PREFIX=/usr/local
+        cmd: make install PREFIX=/usr/local GO={{ forge_go_root }}/bin/go
         chdir: "{{ forge_source_dir }}"
+      environment:
+        GOTOOLCHAIN: local
       changed_when: true
       notify: Restart forge-control-plane
 
@@ -351,6 +359,8 @@
   vars:
     forge_user: forge
     forge_source_dir: /opt/forge-src
+    forge_go_version: "1.25.9"
+    forge_go_root: /usr/local/go
     forge_control_plane_url: "{{ hostvars[inventory_hostname].forge_control_plane_url }}"
     forge_agent_address: "{{ hostvars[inventory_hostname].forge_agent_address }}"
   tasks:
@@ -361,7 +371,6 @@
           - ca-certificates
           - gcc
           - git
-          - golang-go
           - make
           - python3
           - python3-pip
@@ -427,6 +436,9 @@
         - { path: /etc/forge, owner: root, group: root, mode: "0750" }
         - { path: "{{ forge_source_dir }}", owner: root, group: root, mode: "0755" }
 
+    - name: Install Go toolchain
+      ansible.builtin.include_tasks: tasks/install-go.yml
+
     - name: Build local source archive
       ansible.builtin.command:
         cmd: >
@@ -458,16 +470,20 @@
         owner: root
         group: root
 
-    - name: Build Forge binaries on ARM64 host
+    - name: Build Forge binaries on remote host
       ansible.builtin.command:
-        cmd: make clean build
+        cmd: make clean build GO={{ forge_go_root }}/bin/go
         chdir: "{{ forge_source_dir }}"
+      environment:
+        GOTOOLCHAIN: local
       changed_when: true
 
     - name: Install Forge binaries
       ansible.builtin.command:
-        cmd: make install PREFIX=/usr/local
+        cmd: make install PREFIX=/usr/local GO={{ forge_go_root }}/bin/go
         chdir: "{{ forge_source_dir }}"
+      environment:
+        GOTOOLCHAIN: local
       changed_when: true
       notify:
         - Restart forge-agent
