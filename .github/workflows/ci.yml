@@ -107,7 +107,7 @@ jobs:
             --std=c11 \
             build-runner/src/forge_build_runner.c
 
-  # 3. Security scan 
+  # 3. Security scan
   security:
     name: Security (gosec - trivy)
     runs-on: ubuntu-latest
