@@ -47,8 +47,6 @@ jobs:
         )
       }}
 
-    # Configure protection rules at:
-    # Settings > Environments > production > Required reviewers
     environment: production
 
     steps:

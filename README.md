@@ -1,6 +1,6 @@
 # Forge
 
-Forge is a self-hosted deployment platform. You push a commit to GitHub, and Forge builds and runs your application on your own infrastructure — no third-party platform required.
+Forge is a self-hosted deployment platform. You push a commit to GitHub, and Forge builds and runs your application on your own infrastructure - no third-party platform required.
 
 Think of it as a stripped-down Render or Fly.io that you own entirely: one server runs the control plane, one or more servers run your apps, and a reverse proxy routes traffic automatically with TLS.
 
@@ -33,10 +33,10 @@ GitHub
 │                                                                     │
 │  ┌──────────────┐  ┌─────────────┐  ┌─────────────────────────┐     │
 │  │  HTTP Server │  │  Scheduler  │  │  SQLite WAL (state)     │     │
-│  │  – webhook   │  │  – polls DB │  │  – agents               │     │
-│  │  – SSE logs  │  │  – picks    │  │  – deployments          │     │
-│  │  – admin API │  │    agent    │  │  – tasks + events       │     │
-│  │  – /metrics  │  │  – creates  │  │  – encrypted secrets    │     │
+│  │  - webhook   │  │  - polls DB │  │  - agents               │     │
+│  │  - SSE logs  │  │  - picks    │  │  - deployments          │     │
+│  │  - admin API │  │    agent    │  │  - tasks + events       │     │
+│  │  - /metrics  │  │  - creates  │  │  - encrypted secrets    │     │
 │  └──────┬───────┘  │    tasks    │  └─────────────────────────┘     │
 │         │          └─────────────┘                                  │
 │         │  AES-256-GCM vault (secrets at rest)                      │
@@ -49,81 +49,46 @@ GitHub
 │                                                       │
 │  ┌────────────────────────────────────────────────┐   │
 │  │  forge-agent  (C11)                            │   │
-│  │  – polls /api/v1/agents/{id}/tasks every 2s    │   │
-│  │  – streams stdout/stderr back to control plane │   │
-│  │  – health-checks deployed apps                 │   │
-│  │  – attaches cgroup limits to running processes │   │
-│  │  – exposes Prometheus metrics via Unix socket  │   │
+│  │  - polls /api/v1/agents/{id}/tasks every 2s    │   │
+│  │  - streams stdout/stderr back to control plane │   │
+│  │  - health-checks deployed apps                 │   │
+│  │  - attaches cgroup limits to running processes │   │
+│  │  - exposes Prometheus metrics via Unix socket  │   │
 │  └───────────────┬────────────────────────────────┘   │
 │                  │ fork+exec                          │
 │  ┌───────────────▼────────────────────────────────┐   │
 │  │  forge-build-runner  (C11)                     │   │
-│  │  – cgroups v2: memory.max + cpu.max            │   │
-│  │  – Linux namespaces: user + PID + mount        │   │
-│  │  – execvp() the build command                  │   │
+│  │  - cgroups v2: memory.max + cpu.max            │   │
+│  │  - Linux namespaces: user + PID + mount        │   │
+│  │  - execvp() the build command                  │   │
 │  └────────────────────────────────────────────────┘   │
 │                                                       │
 │  App processes (fork'd by agent, bound to $PORT)      │
 └───────────────────────────┬───────────────────────────┘
                             │ private IP:port
                             ▼
-┌──────────────────────────────────────────────┐
-│  Caddy  (reverse proxy)                      │
-│  – dynamic JSON config via Admin API :2019   │
-│  – On-Demand TLS per subdomain               │
-│  – routes: app-name.base-domain → worker:port│
-└──────────────────────────────────────────────┘
+┌───────────────────────────────────────────────┐
+│  Caddy  (reverse proxy)                       │
+│  - dynamic JSON config via Admin API :2019    │
+│  - On-Demand TLS per subdomain                │
+│  - routes: app-name.base-domain -> worker:port│
+└───────────────────────────────────────────────┘
           │ HTTPS
           ▼
        Internet
 
-┌─────────────────────────────────────────────┐
-│  Observability (on control-plane host)      │
-│  – Prometheus scrapes :8080 + worker :9108  │
-│  – forge-exporter bridges Unix socket → HTTP│
-│  – Alertmanager: no-agents + deploy-failures│
-│  – Grafana dashboard                        │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│  Observability (on control-plane host)       │
+│  - Prometheus scrapes :8080 + worker :9108   │
+│  - forge-exporter bridges Unix socket -> HTTP│
+│  - Alertmanager: no-agents + deploy-failures │
+│  - Grafana dashboard                         │
+└──────────────────────────────────────────────┘
 ```
 
-Perhaps easier to visalizer with a mermaid diagram:
+Perhaps easier to visualize with an architecture *mermaid* diagram:
 
-```mermaid
-%%{init: { "theme": "default" }}%%
-
-flowchart TD
-    GH["GitHub\npush webhook - HMAC-SHA256"]
- 
-    subgraph CP["Control Plane (Go)"]
-        SRV["HTTP Server\nwebhook - SSE - admin API - /metrics"]
-        SCH["Scheduler\npolls DB - picks agent - creates tasks"]
-        DB["SQLite WAL\nagents - deployments - tasks - events\nencrypted secrets - AES-256-GCM vault"]
-        SRV <--> DB
-        SCH <--> DB
-    end
- 
-    subgraph WK["Worker Node (private subnet)"]
-        AGT["forge-agent (C11)\npoll tasks - stream logs - health checks\ncgroup attachment - Unix socket metrics"]
-        BLD["forge-build-runner (C11)\ncgroups v2: memory.max + cpu.max\nnamespaces: user + PID + mount\nexecvp build command"]
-        APP["App process\nfork'd by agent - bound to \$PORT\nenv vars injected from vault"]
-        AGT -->|"fork + exec\nper build command"| BLD
-        AGT -->|"fork\nrun command"| APP
-    end
- 
-    OBS["Observability\nPrometheus - Grafana - Alertmanager\nforge-exporter (Unix socket → HTTP :9108)"]
- 
-    CDY["Caddy (reverse proxy)\ndynamic JSON via Admin API :2019\nOn-Demand TLS - HTTP→HTTPS redirect\napp.domain → worker:port"]
- 
-    NET["Internet\nHTTPS"]
- 
-    GH -->|"POST /api/v1/webhook/github"| SRV
-    SRV -->|"HTTP - private VPC\npoll - claim - log events - heartbeat"| AGT
-    APP -->|"private IP:port"| CDY
-    CDY <-->|"POST /load\nroute config"| SRV
-    CDY --> NET
-    OBS -->|"scrape :8080"| CP
-    OBS -->|"scrape :9108"| WK
-```
+![Forge architecture](docs/architecture.png)
 
 ---
 
@@ -138,7 +103,7 @@ POST /api/v1/webhook/github
     │  check repo in FORGE_ALLOWED_REPOS
     │  check branch in FORGE_ALLOWED_BRANCHES
     │  validate commit SHA format (40 or 64 hex chars)
-    │  git clone --depth=1 → parse forge.yaml
+    │  git clone --depth=1 -> parse forge.yaml
     │  validate forge.yaml (unknown fields rejected)
     │
     ▼
@@ -149,26 +114,26 @@ deployments row: status=pending
     │  list online agents (heartbeat within last 15s)
     │  pick agent with most free CPU+RAM above requirements
     │  create task: type=build, status=pending
-    │  deployment → status=building
+    │  deployment -> status=building
     │
     ▼ agent poll (every 2s)
     │  claim task (SELECT … FOR UPDATE via SQLite transaction)
     │  git clone / git fetch + checkout commit SHA
     │  for each build command:
     │    fork forge-build-runner
-    │      → mkdir /sys/fs/cgroup/forge/build-{id}-{i}
-    │      → write memory.max + cpu.max
-    │      → clone(CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNS)
-    │      → write uid_map, gid_map (unprivileged root in ns)
-    │      → execvp /bin/sh -lc "{command}"
-    │    stream stdout/stderr → POST /api/v1/tasks/{id}/events
+    │      -> mkdir /sys/fs/cgroup/forge/build-{id}-{i}
+    │      -> write memory.max + cpu.max
+    │      -> clone(CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNS)
+    │      -> write uid_map, gid_map (unprivileged root in ns)
+    │      -> execvp /bin/sh -lc "{command}"
+    │    stream stdout/stderr -> POST /api/v1/tasks/{id}/events
     │
     ▼ POST /api/v1/tasks/{id}/complete  status=succeeded
     │  control plane: create task: type=run
-    │  deployment → status=deploying
+    │  deployment -> status=deploying
     │
     ▼ agent poll
-    │  decrypt secrets from vault → inject as env vars
+    │  decrypt secrets from vault -> inject as env vars
     │  inject PORT env var (allocated from 20000-39999)
     │  fork app process: execl /bin/sh -lc "{run.command}"
     │  attach app process to cgroup
@@ -180,16 +145,16 @@ deployments row: status=pending
     ▼ POST /api/v1/tasks/{id}/complete  status=succeeded  port=XXXXX
     │  control plane:
     │    POST http://127.0.0.1:2019/load  (Caddy JSON config)
-    │    add route: {app}.{base-domain} → {worker-ip}:{port}
-    │    deployment → status=running
-    │    if previous deployment existed → restore its route on failure
+    │    add route: {app}.{base-domain} -> {worker-ip}:{port}
+    │    deployment -> status=running
+    │    if previous deployment existed -> restore its route on failure
     │
     ▼ SSE event published to all /api/v1/events subscribers
     │
     ▼ app is live at https://{app}.{base-domain}
 ```
 
-If health checks fail: agent kills the process (SIGTERM → 5s → SIGKILL), reports `failed`, control plane rolls back the Caddy route to the previous running deployment.
+If health checks fail: agent kills the process (SIGTERM -> 5s -> SIGKILL), reports `failed`, control plane rolls back the Caddy route to the previous running deployment.
 
 ---
 
@@ -214,13 +179,13 @@ Agent and admin tokens are compared with `crypto/subtle.ConstantTimeCompare` to 
 
 A single-process, poll-driven worker. Key design points:
 
-- **HTTP client**: hand-rolled over raw TCP sockets (`connect_tcp` → `SO_RCVTIMEO`/`SO_SNDTIMEO` 30s). No libcurl dependency.
+- **HTTP client**: hand-rolled over raw TCP sockets (`connect_tcp` -> `SO_RCVTIMEO`/`SO_SNDTIMEO` 30s). No libcurl dependency.
 - **JSON parser**: custom recursive-descent parser (`json_parser.c/h`) with typed tree (`JSON_OBJECT`, `JSON_ARRAY`, `JSON_STRING`, `JSON_NUMBER`, `JSON_BOOL`, `JSON_NULL`), correct UTF-16 surrogate pair handling, and `json_value_as_string` that returns `false` on truncation.
 - **Task execution**: `run_build_task` forks `forge-build-runner` per build command and streams output via pipe. `run_app_task` forks the app process directly with `setsid()` for process group isolation.
 - **Build timeout**: `FORGE_BUILD_TIMEOUT` seconds; implemented with `poll()` + `CLOCK_MONOTONIC` loop, `SIGKILL` on expiry.
 - **Health checks**: plain TCP connect + raw HTTP/1.1 GET to `127.0.0.1:{port}{path}`.
 - **Process monitoring**: detached `process_monitor_thread` calls `waitpid` on running app so `metrics.running_processes` stays accurate.
-- **Graceful termination**: `kill(-pid, SIGTERM)` → 5s poll → `kill(-pid, SIGKILL)`.
+- **Graceful termination**: `kill(-pid, SIGTERM)` -> 5s poll -> `kill(-pid, SIGKILL)`.
 - **Metrics**: Unix socket HTTP server (`SOCK_STREAM`, `AF_UNIX`) serves Prometheus text format; `chmod 0660` on socket path.
 - **Cgroup attachment**: writes `memory.max`, `cpu.max`, and `cgroup.procs` to `/sys/fs/cgroup/forge/run-{deployment_id}` for running apps.
 
@@ -268,7 +233,7 @@ Two independent Terraform stacks under `infra/terraform/`:
 | Outbound | NAT gateway (`create_nat_gateway=true` default) | NAT gateway or `worker_assign_public_ip=true` (free tier default) |
 | DNS | Route53 A records | OCI DNS (optional) |
 
-Workers have no public IP and no inbound internet access. They communicate with the control plane over the VPC private network. Only ports 80/443 (Caddy), 22 (SSH from admin CIDR), 9090/9093/3000 (observability from admin CIDR), and 8080 (control plane API from VPC CIDR) are open on the control plane. Workers only accept connections from the control plane security group on port 9108 (exporter) and 20000–39999 (app ports for Caddy proxying).
+Workers have no public IP and no inbound internet access. They communicate with the control plane over the VPC private network. Only ports 80/443 (Caddy), 22 (SSH from admin CIDR), 9090/9093/3000 (observability from admin CIDR), and 8080 (control plane API from VPC CIDR) are open on the control plane. Workers only accept connections from the control plane security group on port 9108 (exporter) and 20000-39999 (app ports for Caddy proxying).
 
 Ansible bootstraps both hosts: compiles Forge from source, renders `ansible-vault`-encrypted env files, installs and enables `systemd` units for `forge-control-plane`, `forge-agent`, `forge-exporter`, Caddy, Prometheus, Alertmanager, and Grafana.
 
@@ -411,7 +376,7 @@ Forge/
 ├── build-runner/src/
 │   └── forge_build_runner.c # C11 build runner (cgroups + namespaces)
 ├── cmd/forge-exporter/
-│   └── main.go             # Prometheus exporter (Unix socket → HTTP)
+│   └── main.go             # Prometheus exporter (Unix socket -> HTTP)
 ├── control-plane/
 │   ├── cmd/forge-control-plane/main.go
 │   └── internal/
@@ -448,3 +413,49 @@ Forge/
     ├── check-local.sh      # build + unit + race tests
     └── check-iac.sh        # terraform fmt/validate + ansible syntax
 ```
+
+---
+
+## Contributing
+
+Contributions are welcome. Forge has automated checks for the Go control plane, the C agent/build runner, infrastructure, shell scripts, security scans, example `forge.yaml` files, and local smoke coverage.
+
+### Automated Checks
+
+- Go vet, lint, tests, race detector, coverage, and vulnerability checks.
+- C strict compilation and `cppcheck`.
+- Terraform format/validate and Ansible lint.
+- Shell script linting.
+- `forge.yaml` example validation.
+- Security scanning with gosec, Trivy, and CodeQL.
+
+### Templates
+
+- [Bug reports](https://github.com/nelsonramosua/Forge/issues/new?template=bug_report.yml)
+- [Feature requests](https://github.com/nelsonramosua/Forge/issues/new?template=feature_request.yml)
+- [Security issues](https://github.com/nelsonramosua/Forge/issues/new?template=security.yml)
+- [Pull requests](https://github.com/nelsonramosua/Forge/pulls)
+
+For detailed guidelines, see [CONTRIBUTING.md](.github/CONTRIBUTING.md).
+For exploitable vulnerabilities, use [private vulnerability reporting](https://github.com/nelsonramosua/Forge/security/advisories/new) instead of opening a public issue.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+
+## Author
+
+**Nelson Ramos**
+
+- GitHub: [@nelsonramosua](https://github.com/nelsonramosua)
+- LinkedIn: [Nelson Ramos](https://www.linkedin.com/in/nelsonrocharamos/)
+
+## Acknowledgments
+
+- The Go, Caddy, SQLite, Terraform, Ansible, Prometheus, and Grafana projects.
+- The Linux systems community for the primitives Forge builds on: processes, cgroups, namespaces, sockets, and `/proc`.
+- All (eventual) contributors, testers, and early operators.
+
+---
+
+*For questions, suggestions, or bugs, please open an [issue](https://github.com/nelsonramosua/Forge/issues).*

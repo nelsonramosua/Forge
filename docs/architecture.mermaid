@@ -1,0 +1,86 @@
+%%{init: { "theme": "default" }}%%
+
+flowchart LR
+ subgraph CP["Control Plane - Go"]
+    direction TB
+        SRV["HTTP Server<br>/webhook - /events SSE<br>/admin API - /metrics"]
+        AUTH["Auth / Validation<br>admin token - agent token<br>webhook signature"]
+        SCH["Scheduler<br>agent selection<br>capacity checks<br>task creation"]
+        VAULT["Secret Vault<br>AES-256-GCM<br>per-app env injection"]
+        DB[("SQLite WAL<br>agents - deployments<br>tasks - events<br>encrypted secrets")]
+        CADCLI["Caddy Client<br>Admin API :2019<br>route reconciliation"]
+  end
+ subgraph WK["Worker Node - Private Subnet"]
+    direction TB
+        APP["App Process<br>fork/exec run command<br>binds $PORT<br>env from vault"]
+        AGT["forge-agent (C11)<br>long-poll tasks<br>heartbeat - log streaming<br>health checks"]
+        RUNNER["forge-build-runner (C11)<br>cgroups v2<br>memory.max - cpu.max<br>namespaces - execvp"]
+        CG["Linux Isolation<br>cgroups - PID ns<br>mount ns - user ns<br>non-root runtime target"]
+        SOCK["Unix Socket Metrics<br>/run/forge-agent/metrics.sock"]
+        EXP["forge-exporter<br>Unix socket -> HTTP :9108"]
+        FS["App Workspace<br>git clone checkout<br>build artifacts<br>per-deployment dir"]
+  end
+ subgraph EDGE["Edge / Reverse Proxy"]
+    direction TB
+        CDY["Caddy<br>HTTP -> HTTPS<br>On-Demand TLS<br>dynamic JSON routes"]
+        TLS["TLS Automation<br>ACME certificates<br>wildcard app domains"]
+        ROUTE["Routing Table<br>app.nforge.space<br>-> worker-private-ip:$PORT"]
+  end
+ subgraph OBS["Observability"]
+    direction TB
+        PROM["Prometheus<br>scrape control plane<br>scrape worker exporter"]
+        GRAF["Grafana<br>dashboards"]
+        AM["Alertmanager<br>alerts - SLOs"]
+  end
+    SRV --> AUTH
+    AUTH --> DB
+    SRV <--> DB
+    SCH <--> DB
+    VAULT <--> DB
+    CADCLI <--> DB
+    AGT -- build task --> RUNNER
+    RUNNER --> CG & FS
+    AGT -- run task --> APP
+    AGT --> SOCK
+    SOCK --> EXP
+    APP --> FS
+    CDY --> TLS & ROUTE
+    PROM --> GRAF & AM
+    GH["GitHub<br><b>Push webhook</b><br>HMAC-SHA256 - repo/branch allowlist"] -- POST /api/v1/webhook/github --> SRV
+    SRV -- "private VPC HTTP<br>poll - claim - complete<br>logs - heartbeat" --> AGT
+    AGT -- task events<br>deployment status --> SRV
+    CADCLI -- POST /load<br>dynamic route config --> CDY
+    APP -- private IP:$PORT --> ROUTE
+    ROUTE --> CDY
+    CDY -- HTTPS --> NET["Internet<br>HTTPS users"]
+    PROM -. scrape :8080 .-> SRV
+    PROM -. scrape :9108 .-> EXP
+
+     SRV:::control
+     AUTH:::control
+     SCH:::control
+     VAULT:::control
+     DB:::data
+     CADCLI:::control
+     AGT:::worker
+     RUNNER:::worker
+     CG:::worker
+     APP:::worker
+     SOCK:::worker
+     EXP:::worker
+     FS:::worker
+     CDY:::edge
+     TLS:::edge
+     ROUTE:::edge
+     PROM:::obs
+     GRAF:::obs
+     AM:::obs
+     GH:::external
+     NET:::internet
+    classDef external fill:#f3f0ea,stroke:#555,color:#222
+    classDef control fill:#ecebff,stroke:#6d5dfc,color:#1f1f4d
+    classDef worker fill:#e1f7ef,stroke:#10a37f,color:#063f35
+    classDef edge fill:#fff1d6,stroke:#c47a00,color:#5c3400
+    classDef obs fill:#f3f0ea,stroke:#555,color:#222
+    classDef internet fill:#e4f2ff,stroke:#1d72b8,color:#073b66
+    classDef data fill:#fff8e8,stroke:#b87900,color:#3d2a00

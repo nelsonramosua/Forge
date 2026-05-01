@@ -15,9 +15,9 @@ permissions:
   contents: read
 
 jobs:
-  # ── 1. Go: vet, lint, test ──────────────────────────────────────────────────
+  # 1. Go: vet, lint, test
   go:
-    name: Go (vet · lint · test)
+    name: Go (vet - lint - test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -58,9 +58,9 @@ jobs:
           path: coverage.out
           retention-days: 7
 
-  # ── 2. C: compile (strict flags) + cppcheck ────────────────────────────────
+  # 2. C: compile (strict flags) + cppcheck
   c:
-    name: C (compile · cppcheck)
+    name: C (compile - cppcheck)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -107,9 +107,9 @@ jobs:
             --std=c11 \
             build-runner/src/forge_build_runner.c
 
-  # ── 3. Security scan ────────────────────────────────────────────────────────
+  # 3. Security scan 
   security:
-    name: Security (gosec · trivy)
+    name: Security (gosec - trivy)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -161,9 +161,9 @@ jobs:
           sarif_file: trivy.sarif
           category: trivy
 
-  # ── 4. Infrastructure validation ────────────────────────────────────────────
+  # 4. Infrastructure validation
   iac:
-    name: IaC (terraform fmt/validate · ansible lint)
+    name: IaC (terraform fmt/validate - ansible lint)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -199,7 +199,7 @@ jobs:
             --exclude infra/ansible/group_vars/all/vault.yml \
             infra/ansible/playbook.yml
 
-  # ── 5. Shell scripts ─────────────────────────────────────────────────────────
+  # 5. Shell scripts
   shell:
     name: Shell (shellcheck)
     runs-on: ubuntu-latest
@@ -212,7 +212,7 @@ jobs:
           scandir: scripts
           severity: warning
 
-  # ── 6. forge.yaml examples validation ───────────────────────────────────────
+  # 6. forge.yaml examples validation
   forgeyaml:
     name: forge.yaml examples
     runs-on: ubuntu-latest
@@ -274,7 +274,7 @@ jobs:
           EOF
           go run ./control-plane/ci_validate_forgeyaml.go
 
-  # ── 7. E2E smoke (Linux only, no network) ────────────────────────────────────
+  # 7. E2E smoke (Linux only, no network)
   e2e:
     name: E2E smoke
     runs-on: ubuntu-latest
@@ -299,7 +299,7 @@ jobs:
         env:
           FORGE_ALLOW_LOCAL_REPOS: "true"
 
-  # ── Status gate (required by branch protection) ──────────────────────────────
+  # Status gate (required by branch protection)
   ci-ok:
     name: CI passed
     runs-on: ubuntu-latest

@@ -73,9 +73,7 @@ BASE_DOMAIN      A  CONTROL_PLANE_PUBLIC_IP
 ```
 
 `admin_cidr` must be your own narrow IPv4 CIDR, typically `YOUR_PUBLIC_IP/32`.
-Terraform rejects `0.0.0.0/0`. The control-plane API port `8080` is only opened
-inside the VCN; use public HTTPS on `443` or SSH into the control-plane VM for
-local checks.
+Terraform rejects `0.0.0.0/0`. The control-plane API port `8080` is only opened inside the VCN; use public HTTPS on `443` or SSH into the control-plane VM for local checks.
 
 ## 2.1 Common OCI Free Tier Failures
 
@@ -176,8 +174,7 @@ forge_allowed_branches:
   - main
 ```
 
-The control plane intentionally refuses to start without secrets and at least
-one allowed repository.
+The control plane intentionally refuses to start without secrets and at least one allowed repository.
 
 ## 4. Ansible
 

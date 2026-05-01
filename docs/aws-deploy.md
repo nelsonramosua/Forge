@@ -93,9 +93,7 @@ Find your public IP:
 curl ifconfig.me
 ```
 
-`admin_cidr` must not be `0.0.0.0/0`. Terraform rejects that value. The public
-control-plane API port `8080` is not opened; use HTTPS on `443` or SSH into the
-control-plane VM for local checks.
+`admin_cidr` must not be `0.0.0.0/0`. Terraform rejects that value. The public control-plane API port `8080` is not opened; use HTTPS on `443` or SSH into the control-plane VM for local checks.
 
 ## 5. Apply AWS Terraform
 
@@ -112,13 +110,9 @@ Terraform creates:
 - VPC, public subnet, internet gateway, route table.
 - Security group for the control plane.
 - Control-plane API port `8080` is reachable only from inside the Forge VPC.
-  Use Caddy over HTTPS for public webhooks and SSH into the control plane for
-  local admin/metrics checks.
+  Use Caddy over HTTPS for public webhooks and SSH into the control plane for local admin/metrics checks.
 - Security group for the worker; worker inbound is only from the control-plane security group.
-- Worker instances do not receive an IAM instance profile, and EC2 metadata is
-  locked to IMDSv2. In the Free Tier topology the worker still has a public IP
-  for outbound package/app dependency downloads without a paid NAT gateway; its
-  security group does not allow public inbound traffic.
+- Worker instances do not receive an IAM instance profile, and EC2 metadata is locked to IMDSv2. In the Free Tier topology the worker still has a public IP for outbound package/app dependency downloads without a paid NAT gateway; its security group does not allow public inbound traffic.
 - EC2 key pair.
 - `forge-control-plane` EC2 instance.
 - `forge-worker-1` EC2 instance.
@@ -150,8 +144,7 @@ forge.example.com   A  203.0.113.10
 
 create those two records in the DNS provider that currently hosts the domain.
 If the domain uses a registrar's default nameservers, create the records there.
-If you create a Route 53 hosted zone, update the domain's nameservers at the
-registrar to the Route 53 nameservers.
+If you create a Route 53 hosted zone, update the domain's nameservers at the registrar to the Route 53 nameservers.
 
 Check resolution before using the domain:
 
@@ -160,11 +153,9 @@ dig +short "$BASE_DOMAIN"
 dig +short "myapp.$BASE_DOMAIN"
 ```
 
-Both should return the control-plane public IP. Until DNS resolves, use the IP
-directly for smoke tests:
+Both should return the control-plane public IP. Until DNS resolves, use the IP directly for smoke tests:
 
-If `dig` times out against a local resolver such as `10.255.255.254`, test
-against public resolvers before changing DNS records:
+If `dig` times out against a local resolver such as `10.255.255.254`, test against public resolvers before changing DNS records:
 
 ```sh
 dig @1.1.1.1 +short "$BASE_DOMAIN"
@@ -173,24 +164,19 @@ dig @1.1.1.1 +short "myapp.$BASE_DOMAIN"
 ```
 
 Timeouts against only the local resolver usually mean a local DNS/WSL/VPN issue.
-Empty answers from public resolvers usually mean the records are not published
-yet or the domain's nameservers point somewhere else.
+Empty answers from public resolvers usually mean the records are not published yet or the domain's nameservers point somewhere else.
 
 ### Cloudflare DNS
 
-For the first end-to-end test, set both records to **DNS only** in Cloudflare,
-not proxied:
+For the first end-to-end test, set both records to **DNS only** in Cloudflare, not proxied:
 
 ```text
 @   A  CONTROL_PLANE_PUBLIC_IP  DNS only
 *   A  CONTROL_PLANE_PUBLIC_IP  DNS only
 ```
 
-Forge already uses Caddy on the control-plane VM to serve public HTTPS on port
-`443` and to reverse-proxy the control-plane API on `127.0.0.1:8080`.
-Application subdomains use Caddy On-Demand TLS with an internal Forge allow
-check, so the first HTTPS request to a new app hostname can take a few seconds
-while Caddy obtains the certificate.
+Forge already uses Caddy on the control-plane VM to serve public HTTPS on port `443` and to reverse-proxy the control-plane API on `127.0.0.1:8080`.
+Application subdomains use Caddy On-Demand TLS with an internal Forge allow check, so the first HTTPS request to a new app hostname can take a few seconds while Caddy obtains the certificate.
 
 Use these URLs:
 
@@ -208,11 +194,7 @@ https://BASE_DOMAIN:8080/healthz
 
 Port `8080` is plain HTTP and is intentionally not the public HTTPS entrypoint.
 
-After direct DNS-only mode is working, Cloudflare proxy can be re-enabled, but
-set **SSL/TLS encryption mode** to `Full (strict)` and confirm Cloudflare can
-reach the origin on `443`. A Cloudflare `521` means Cloudflare could not connect
-to the origin web server, commonly because the origin is not listening on the
-expected port or a firewall blocks Cloudflare.
+After direct DNS-only mode is working, Cloudflare proxy can be re-enabled, but set **SSL/TLS encryption mode** to `Full (strict)` and confirm Cloudflare can reach the origin on `443`. A Cloudflare `521` means Cloudflare could not connect to the origin web server, commonly because the origin is not listening on the expected port or a firewall blocks Cloudflare.
 
 If public DNS still returns Cloudflare IPs, the records are still proxied:
 
@@ -220,11 +202,9 @@ If public DNS still returns Cloudflare IPs, the records are still proxied:
 dig @1.1.1.1 +short "$BASE_DOMAIN"
 ```
 
-`104.x.x.x` or `172.x.x.x` answers are Cloudflare edge IPs. In DNS-only mode the
-answer should be the control-plane public IP.
+`104.x.x.x` or `172.x.x.x` answers are Cloudflare edge IPs. In DNS-only mode the answer should be the control-plane public IP.
 
-After switching to DNS-only, reload Caddy on the control plane and verify both
-HTTP and HTTPS at the origin:
+After switching to DNS-only, reload Caddy on the control plane and verify both HTTP and HTTPS at the origin:
 
 ```sh
 CONTROL_IP=$(terraform -chdir=infra/terraform/aws output -raw control_plane_public_ip)
@@ -237,8 +217,7 @@ curl --resolve "$BASE_DOMAIN:80:$CONTROL_IP" -fsS "http://$BASE_DOMAIN/healthz"
 curl --resolve "$BASE_DOMAIN:443:$CONTROL_IP" -fsS "https://$BASE_DOMAIN/healthz"
 ```
 
-If port `80` returns a Caddy `404`, the active Caddy config does not contain the
-base-domain reverse proxy route. Re-run the control-plane Ansible play:
+If port `80` returns a Caddy `404`, the active Caddy config does not contain the base-domain reverse proxy route. Re-run the control-plane Ansible play:
 
 ```sh
 ANSIBLE_PRIVATE_KEY_FILE=~/.ssh/forge_aws \
@@ -303,9 +282,7 @@ ANSIBLE_PRIVATE_KEY_FILE=~/.ssh/forge_aws \
 ansible-playbook -i infra/ansible/inventory.ini infra/ansible/playbook.yml --ask-vault-pass
 ```
 
-The worker is reached through the control-plane instance. Use an explicit SSH
-`ProxyCommand` so the same local private key is used for both SSH hops; do not
-copy the private key to the control-plane instance.
+The worker is reached through the control-plane instance. Use an explicit SSH `ProxyCommand` so the same local private key is used for both SSH hops; do not copy the private key to the control-plane instance!
 
 ## 9. Smoke Tests
 
@@ -319,9 +296,7 @@ curl -fsS http://$CONTROL_IP:9090/-/healthy
 curl -fsS http://$CONTROL_IP:3000/api/health
 ```
 
-If the control-plane API returns an error about `data/forge.db`, rerun Ansible
-or reload the unit manually. The deployed service must use
-`FORGE_DB_PATH=/var/lib/forge/forge.db`, not the local development default.
+If the control-plane API returns an error about `data/forge.db`, rerun Ansible or reload the unit manually. The deployed service must use `FORGE_DB_PATH=/var/lib/forge/forge.db`, not the local development default.
 
 ```sh
 ssh -i ~/.ssh/forge_aws ubuntu@$CONTROL_IP \
@@ -339,9 +314,7 @@ curl -fsS http://$WORKER_PRIVATE_IP:9108/metrics
 systemctl status forge-control-plane caddy prometheus prometheus-alertmanager grafana-server
 ```
 
-If worker metrics return `502`, the worker exporter is reachable but cannot
-read the agent's local metrics socket. Redeploy the worker play and verify the
-socket is owned by `root:forge` with group read/write permissions:
+If worker metrics return `502`, the worker exporter is reachable but cannot read the agent's local metrics socket. Redeploy the worker play and verify the socket is owned by `root:forge` with group read/write permissions:
 
 ```sh
 ANSIBLE_PRIVATE_KEY_FILE=~/.ssh/forge_aws \
@@ -356,10 +329,8 @@ ssh -i "$SSH_KEY" \
   'sudo ls -l /run/forge-agent/metrics.sock && sudo systemctl restart forge-exporter'
 ```
 
-Forge allocates app host ports from `20000-39999` by default. Apps should bind
-to `$PORT`; do not hard-code the manifest `run.port` inside the app process.
-See [runtime-model.md](runtime-model.md) for dependency and port isolation
-guidance.
+Forge allocates app host ports from `20000-39999` by default. Apps should bind to `$PORT`; do not hard-code the manifest `run.port` inside the app process. 
+See [runtime-model.md](runtime-model.md) for dependency and port isolation guidance.
 
 Worker check:
 
@@ -375,9 +346,7 @@ ssh -i "$SSH_KEY" \
 
 ## 10. GitHub End-To-End Test
 
-The first GitHub E2E should use a public repository. Private repositories need
-deploy-key or GitHub App support because Forge currently clones the webhook
-`clone_url` without credentials.
+The first GitHub E2E should use a public repository. Private repositories need deploy-key or GitHub App support because Forge currently clones the webhook `clone_url` without credentials.
 
 Confirm public DNS and TLS first:
 
@@ -390,8 +359,7 @@ dig @1.1.1.1 +short "myapp.$BASE_DOMAIN"
 curl -fsS "https://$BASE_DOMAIN/healthz"
 ```
 
-If local DNS is still broken but public DNS is correct, use `--resolve` for
-local smoke tests:
+If local DNS is still broken but public DNS is correct, use `--resolve` for local smoke tests:
 
 ```sh
 curl --resolve "$BASE_DOMAIN:443:$CONTROL_IP" -fsS "https://$BASE_DOMAIN/healthz"
@@ -431,16 +399,15 @@ Use only `vault_forge_github_webhook_secret` as the GitHub webhook secret.
 
 In the GitHub repository, create a webhook:
 
-- Payload URL: `https://YOUR_BASE_DOMAIN/api/v1/webhook/github`
-- Content type: `application/json`
-- Secret: `vault_forge_github_webhook_secret`
-- SSL verification: enabled
-- Events: just `push`
-- Active: enabled
+- Payload URL: `https://YOUR_BASE_DOMAIN/api/v1/webhook/github`.
+- Content type: `application/json`.
+- Secret: `vault_forge_github_webhook_secret`.
+- SSL verification: enabled.
+- Events: just `push`.
+- Active: enabled.
 
-GitHub sends a `ping` delivery when the webhook is created. The Forge control
-plane answers that ping without deploying; the first real deployment comes from
-a `push` event on an allowed branch.
+GitHub sends a `ping` delivery when the webhook is created. 
+The Forge control plane answers that ping without deploying; the first real deployment comes from a `push` event on an allowed branch.
 
 Watch live Forge events in one terminal:
 
@@ -449,7 +416,7 @@ ADMIN_TOKEN="$(ansible-vault view infra/ansible/group_vars/all/vault.yml | awk -
 curl -N -H "Authorization: Bearer $ADMIN_TOKEN" "https://$BASE_DOMAIN/api/v1/events"
 ```
 
-Trigger a deployment in the app repository:
+Trigger a deployment in the *app* repository:
 
 ```sh
 cd /tmp/forge-e2e-smoke
@@ -462,7 +429,7 @@ git push
 Expected lifecycle:
 
 ```text
-pending -> building -> deploying -> running
+pending -> building -> deploying -> running.
 ```
 
 Validate the deployed app:
@@ -493,13 +460,13 @@ ssh -i "$SSH_KEY" \
 
 ## 11. Cleanup
 
-To avoid costs:
+To avoid costs, you may want to:
 
 ```sh
 terraform -chdir=infra/terraform/aws destroy
 ```
 
-Also check:
+Also check, then:
 
 - EC2 instances terminated.
 - EBS volumes deleted.
