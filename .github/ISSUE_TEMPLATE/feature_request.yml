@@ -54,4 +54,3 @@ body:
         - "No, just proposing"
     validations:
       required: true
-

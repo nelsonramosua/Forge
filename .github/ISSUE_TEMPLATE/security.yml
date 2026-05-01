@@ -59,4 +59,3 @@ body:
       description: If you have a fix or workaround in mind, describe it here.
     validations:
       required: false
-

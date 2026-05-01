@@ -101,4 +101,3 @@ body:
       description: Anything else that may help us understand the issue.
     validations:
       required: false
-
