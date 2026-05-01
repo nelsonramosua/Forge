@@ -140,9 +140,10 @@ jobs:
           EOF
 
       - name: Terraform init (with S3 backend)
-        run: terraform -chdir=infra/terraform/aws init \
-          -backend-config=backend-config.tfvars \
-          -input=false
+        run: |
+          terraform -chdir=infra/terraform/aws init \
+            -backend-config=backend-config.tfvars \
+            -input=false
 
       - name: Terraform plan (drift detection)
         id: plan

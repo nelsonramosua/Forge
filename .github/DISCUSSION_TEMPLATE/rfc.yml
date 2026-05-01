@@ -5,7 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Use this for larger design changes before implementation: new task types, scheduler behaviour, forge.yaml schema additions, infrastructure topology, or control-plane and agent protocol changes.
+        Use this for larger design changes before implementation: new task types,
+        scheduler behaviour, forge.yaml schema additions, infrastructure topology,
+        or control-plane and agent protocol changes.
 
   - type: textarea
     id: problem

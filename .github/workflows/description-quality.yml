@@ -108,4 +108,3 @@ jobs:
               issue_number: item.number,
               body: message,
             });
-
