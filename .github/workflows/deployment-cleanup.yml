@@ -1,0 +1,153 @@
+name: Deployment cleanup
+
+on:
+  workflow_run:
+    workflows: ["Deploy"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "GitHub deployment environment to clean"
+        required: true
+        default: production
+      keep:
+        description: "Number of latest completed deployments to keep"
+        required: true
+        default: "1"
+      dry_run:
+        description: "Show what would be deleted without deleting"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  deployments: write
+
+concurrency:
+  group: deployment-cleanup-production
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Cleanup production deployments
+    runs-on: ubuntu-latest
+    env:
+      DEPLOYMENT_ENVIRONMENT: ${{ github.event.inputs.environment || 'production' }}
+      DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+      KEEP_DEPLOYMENTS: ${{ github.event.inputs.keep || '1' }}
+
+    steps:
+      - name: Delete older deployments
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const environment = process.env.DEPLOYMENT_ENVIRONMENT;
+            const keepCount = Math.max(Number.parseInt(process.env.KEEP_DEPLOYMENTS, 10) || 1, 1);
+            const dryRun = process.env.DRY_RUN === 'true';
+            const inProgressStates = new Set(['queued', 'pending', 'in_progress']);
+
+            const deployments = await github.paginate(github.rest.repos.listDeployments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              environment,
+              per_page: 100,
+            });
+
+            const deploymentsWithStatus = await Promise.all(
+              deployments.map(async (deployment) => {
+                const statuses = await github.rest.repos.listDeploymentStatuses({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  deployment_id: deployment.id,
+                  per_page: 1,
+                });
+
+                return {
+                  ...deployment,
+                  currentStatus: statuses.data[0]?.state || 'unknown',
+                };
+              }),
+            );
+
+            deploymentsWithStatus.sort((a, b) => {
+              const byDate = new Date(b.created_at) - new Date(a.created_at);
+              return byDate || b.id - a.id;
+            });
+
+            const completedDeployments = deploymentsWithStatus.filter(
+              (deployment) => !inProgressStates.has(deployment.currentStatus),
+            );
+
+            const protectedDeployments = new Set();
+            for (const deployment of completedDeployments.slice(0, keepCount)) {
+              protectedDeployments.add(deployment.id);
+            }
+
+            for (const deployment of deploymentsWithStatus) {
+              if (inProgressStates.has(deployment.currentStatus)) {
+                protectedDeployments.add(deployment.id);
+              }
+            }
+
+            const deletable = deploymentsWithStatus.filter(
+              (deployment) => !protectedDeployments.has(deployment.id),
+            );
+
+            let deletedCount = 0;
+            let skippedCount = 0;
+
+            core.info(`Environment: ${environment}`);
+            core.info(`Total deployments: ${deploymentsWithStatus.length}`);
+            core.info(`Keeping latest completed deployments: ${keepCount}`);
+            core.info(`Additional in-progress deployments kept: ${
+              deploymentsWithStatus.filter((d) => inProgressStates.has(d.currentStatus)).length
+            }`);
+            core.info(`Candidates for deletion: ${deletable.length}`);
+
+            for (const deployment of deletable) {
+              const label = `${deployment.id} (${deployment.sha.slice(0, 7)}, ${deployment.currentStatus})`;
+
+              if (dryRun) {
+                core.info(`[dry-run] Would delete deployment ${label}`);
+                skippedCount++;
+                continue;
+              }
+
+              try {
+                if (deployment.currentStatus !== 'inactive') {
+                  await github.rest.repos.createDeploymentStatus({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    deployment_id: deployment.id,
+                    state: 'inactive',
+                    auto_inactive: false,
+                    description: 'Marked inactive before cleanup',
+                  });
+                }
+
+                await github.rest.repos.deleteDeployment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  deployment_id: deployment.id,
+                });
+
+                core.info(`Deleted deployment ${label}`);
+                deletedCount++;
+              } catch (error) {
+                core.warning(`Could not delete deployment ${label}: ${error.message}`);
+                skippedCount++;
+              }
+            }
+
+            await core.summary
+              .addHeading('Deployment Cleanup')
+              .addTable([
+                [{ data: 'Metric', header: true }, { data: 'Value', header: true }],
+                ['Environment', environment],
+                ['Total deployments', String(deploymentsWithStatus.length)],
+                ['Latest completed kept', String(keepCount)],
+                ['Deleted', String(deletedCount)],
+                [dryRun ? 'Dry-run skipped' : 'Skipped', String(skippedCount)],
+              ])
+              .write();

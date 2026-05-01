@@ -1,0 +1,111 @@
+name: Description quality
+
+on:
+  issues:
+    types: [opened, edited]
+  pull_request_target:
+    types: [opened, edited]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  check-quality:
+    name: Check description quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check description
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const marker = '<!-- forge-description-quality -->';
+            const isPullRequest = context.eventName === 'pull_request_target';
+            const item = isPullRequest ? context.payload.pull_request : context.payload.issue;
+            const login = item.user.login;
+            const botLogins = new Set([
+              'dependabot[bot]',
+              'github-actions[bot]',
+              'renovate[bot]',
+              'pre-commit-ci[bot]',
+            ]);
+
+            if (item.user.type === 'Bot' || botLogins.has(login) || login.endsWith('[bot]')) {
+              core.info(`Skipping bot account: ${login}`);
+              return;
+            }
+
+            const body = (item.body || '').trim();
+            const minimumLength = isPullRequest ? 120 : 160;
+            const label = isPullRequest ? 'needs-description' : 'needs-more-info';
+            const currentLabels = new Set((item.labels || []).map((current) => current.name));
+            const isTooBrief = body.length < minimumLength;
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: item.number,
+              per_page: 100,
+            });
+
+            const alreadyCommented = comments.some((comment) => comment.body?.includes(marker));
+
+            if (!isTooBrief) {
+              if (currentLabels.has(label)) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: item.number,
+                  name: label,
+                });
+                core.info(`Removed ${label}; description now has ${body.length} characters.`);
+              }
+              return;
+            }
+
+            if (!currentLabels.has(label)) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: item.number,
+                labels: [label],
+              });
+            }
+
+            if (alreadyCommented) {
+              core.info(`Quality guidance already exists on #${item.number}`);
+              return;
+            }
+
+            const issueGuidance = [
+              '**For bugs:** include steps to reproduce, expected behaviour, actual behaviour, logs, and environment.',
+              '**For feature requests:** include the use case, motivation, proposed solution, and affected components.',
+            ].join('\n');
+
+            const pullRequestGuidance = [
+              '**What:** briefly describe the change.',
+              '**Why:** explain the motivation or bug being fixed.',
+              '**Testing:** list the commands or deployment checks you ran.',
+              '**Compatibility:** call out forge.yaml, API, infra, or operational impact.',
+            ].join('\n');
+
+            const message = [
+              marker,
+              `Thanks for opening this ${isPullRequest ? 'pull request' : 'issue'}, @${login}.`,
+              '',
+              `The description is currently quite brief (${body.length} characters).`,
+              `Please add a little more context so maintainers can triage it without guessing.`,
+              '',
+              isPullRequest ? pullRequestGuidance : issueGuidance,
+              '',
+              'You can edit the description above. The label will be removed automatically once there is enough detail.',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: item.number,
+              body: message,
+            });
+

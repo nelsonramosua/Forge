@@ -1,0 +1,76 @@
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.md"
+          - "docs/**"
+          - ".github/CODE_OF_CONDUCT.md"
+          - ".github/CONTRIBUTING.md"
+          - ".github/SECURITY.md"
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "go.mod"
+          - "go.sum"
+          - "**/go.mod"
+          - "**/go.sum"
+
+"area: control-plane":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "control-plane/**"
+          - "cmd/forge-exporter/**"
+
+"area: agent":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "agent/**"
+
+"area: build-runner":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "build-runner/**"
+
+"area: forge-yaml":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "control-plane/internal/forgeyaml/**"
+          - "examples/**/forge.yaml"
+          - "examples/forge.yaml"
+
+"area: infra":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "infra/**"
+
+"area: ci":
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/dependabot.yml"
+          - ".github/labeler.yml"
+          - ".github/labels.yml"
+          - ".github/workflows/**"
+          - "scripts/**"
+          - "Makefile"
+
+"area: observability":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "observability/**"
+          - "docs/slo.md"
+          - "docs/runbooks/**"
+
+"area: examples":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "examples/**"
+
+security:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/SECURITY.md"
+          - ".github/ISSUE_TEMPLATE/security.md"
+          - ".github/workflows/codeql.yml"
+          - "agent/**"
+          - "build-runner/**"
+          - "control-plane/internal/vault/**"

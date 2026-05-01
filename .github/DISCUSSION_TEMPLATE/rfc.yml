@@ -1,0 +1,51 @@
+title: "[RFC] "
+labels:
+  - rfc
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for larger design changes before implementation: new task types, scheduler behaviour, forge.yaml schema additions, infrastructure topology, or control-plane and agent protocol changes.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What gap or limitation are you trying to address?
+    validations:
+      required: true
+
+  - type: textarea
+    id: design
+    attributes:
+      label: Proposed design
+      description: Describe the solution in enough detail for someone else to implement.
+      placeholder: |
+        Include API shape, forge.yaml fields, data model changes, protocol changes, and infrastructure changes if relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: open-questions
+    attributes:
+      label: Open questions
+      description: What is still unresolved, and what feedback are you looking for?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: What other designs did you consider, and why did you prefer this one?
+    validations:
+      required: false
+
+  - type: textarea
+    id: rollout
+    attributes:
+      label: Rollout or migration
+      description: How would existing deployments be affected?
+      placeholder: Is this backward compatible? What needs to be migrated?
+    validations:
+      required: false

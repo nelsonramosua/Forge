@@ -1,0 +1,114 @@
+name: Welcome
+
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  welcome:
+    name: Welcome first-time contributors
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post welcome comment
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const marker = '<!-- forge-welcome-new-contributor -->';
+            const isPullRequest = context.eventName === 'pull_request_target';
+            const item = isPullRequest ? context.payload.pull_request : context.payload.issue;
+            const login = item.user.login;
+            const botLogins = new Set([
+              'dependabot[bot]',
+              'github-actions[bot]',
+              'renovate[bot]',
+              'pre-commit-ci[bot]',
+            ]);
+
+            if (item.user.type === 'Bot' || botLogins.has(login) || login.endsWith('[bot]')) {
+              core.info(`Skipping bot account: ${login}`);
+              return;
+            }
+
+            if (login === context.repo.owner) {
+              core.info(`Skipping repository owner: ${login}`);
+              return;
+            }
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: item.number,
+              per_page: 100,
+            });
+
+            if (comments.some((comment) => comment.body?.includes(marker))) {
+              core.info(`Welcome comment already exists on #${item.number}`);
+              return;
+            }
+
+            const search = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${context.repo.owner}/${context.repo.repo} author:${login}`,
+              sort: 'created',
+              order: 'asc',
+              per_page: 100,
+            });
+
+            const previousItems = search.data.items.filter((result) => result.html_url !== item.html_url);
+            if (previousItems.length > 0) {
+              core.info(`${login} already has ${previousItems.length} previous issue or PR(s).`);
+              return;
+            }
+
+            const issueMessage = [
+              marker,
+              `Welcome to the Forge community, @${login}.`,
+              '',
+              'Thanks for opening your first issue here. Forge touches a few different layers, so useful reports usually include:',
+              '',
+              '- reproduction steps or the exact command that failed',
+              '- relevant logs with tokens, IPs, and secrets redacted',
+              '- deployment target: local, AWS, or OCI',
+              '- the affected component, such as control-plane, forge-agent, forge-build-runner, Terraform, Ansible, or examples',
+              '',
+              'Useful links:',
+              '',
+              `- [Contributing guidelines](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/.github/CONTRIBUTING.md)`,
+              `- [Testing guide](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/docs/testing.md)`,
+              `- [Private security reporting](https://github.com/${context.repo.owner}/${context.repo.repo}/security/advisories/new)`,
+              '',
+              'A maintainer will take a look soon.',
+            ].join('\n');
+
+            const pullRequestMessage = [
+              marker,
+              `Welcome to the Forge community, @${login}.`,
+              '',
+              'Thanks for opening your first pull request here. Before review, please make sure:',
+              '',
+              '- the PR template is filled in',
+              '- relevant checks have been run locally, such as `make test`, `make build`, or `scripts/e2e-local.sh`',
+              '- any forge.yaml schema change is backward compatible or has a migration note',
+              '- no secrets, tokens, private IPs, or personal data are present in the diff',
+              '',
+              'Useful links:',
+              '',
+              `- [Contributing guidelines](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/.github/CONTRIBUTING.md)`,
+              `- [Testing guide](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/docs/testing.md)`,
+              `- [Runtime model](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/docs/runtime-model.md)`,
+              '',
+              'A maintainer will review it soon.',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: item.number,
+              body: isPullRequest ? pullRequestMessage : issueMessage,
+            });

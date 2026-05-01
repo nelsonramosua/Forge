@@ -1,0 +1,95 @@
+- name: "bug"
+  color: "#d73a4a"
+  description: "Something is broken or behaving unexpectedly"
+
+- name: "enhancement"
+  color: "#a2eeef"
+  description: "New capability or improvement"
+
+- name: "security"
+  color: "#b60205"
+  description: "Security hardening, vulnerability reports, or dependency advisories"
+
+- name: "documentation"
+  color: "#0075ca"
+  description: "Documentation, examples, runbooks, or community files"
+
+- name: "question"
+  color: "#d876e3"
+  description: "Question about behaviour, configuration, or usage"
+
+- name: "rfc"
+  color: "#5319e7"
+  description: "Design proposal needing discussion before implementation"
+
+- name: "dependencies"
+  color: "#0366d6"
+  description: "Dependency, toolchain, or generated lockfile updates"
+
+- name: "good first issue"
+  color: "#7057ff"
+  description: "Small, well-scoped issue for new contributors"
+
+- name: "help wanted"
+  color: "#008672"
+  description: "Extra help or review would be useful"
+
+- name: "needs-more-info"
+  color: "#d4c5f9"
+  description: "Issue needs more detail before it can be triaged"
+
+- name: "needs-description"
+  color: "#d4c5f9"
+  description: "Pull request needs a clearer description before review"
+
+- name: "blocked"
+  color: "#b60205"
+  description: "Cannot move forward until an external dependency is resolved"
+
+- name: "drift"
+  color: "#fbca04"
+  description: "Terraform state differs from live infrastructure"
+
+- name: "duplicate"
+  color: "#cfd3d7"
+  description: "This issue or pull request already exists"
+
+- name: "invalid"
+  color: "#e4e669"
+  description: "This does not appear to be actionable"
+
+- name: "wontfix"
+  color: "#ffffff"
+  description: "This will not be worked on"
+
+- name: "area: control-plane"
+  color: "#1d76db"
+  description: "Control plane API, server, store, proxy, vault, or config"
+
+- name: "area: agent"
+  color: "#0052cc"
+  description: "forge-agent runtime, task execution, or host integration"
+
+- name: "area: build-runner"
+  color: "#0e8a16"
+  description: "forge-build-runner sandboxing, builds, or process launch"
+
+- name: "area: forge-yaml"
+  color: "#bfdadc"
+  description: "forge.yaml schema, parser, examples, or compatibility"
+
+- name: "area: infra"
+  color: "#fbca04"
+  description: "Terraform, Ansible, cloud networking, or deployment topology"
+
+- name: "area: ci"
+  color: "#c2e0c6"
+  description: "GitHub Actions, linting, tests, release, or automation"
+
+- name: "area: observability"
+  color: "#006b75"
+  description: "Prometheus, Alertmanager, Grafana, alerts, or SLOs"
+
+- name: "area: examples"
+  color: "#fef2c0"
+  description: "Example applications and sample forge.yaml files"

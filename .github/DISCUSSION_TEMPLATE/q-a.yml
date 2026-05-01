@@ -1,0 +1,51 @@
+title: "[Q&A] "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for questions about how Forge works, how to configure it, or whether behaviour is expected. For bugs, open a bug report instead.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What do you want to understand?
+      placeholder: Include forge.yaml, environment config, or logs if relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you already tried?
+      description: What docs, runbooks, examples, commands, or logs have you checked?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of Forge is your question about?
+      options:
+        - control-plane
+        - forge-agent
+        - forge-build-runner
+        - forge.yaml
+        - Terraform / Ansible
+        - AWS / OCI deployment
+        - observability
+        - examples
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Optional environment details, version, commit SHA, or deployment target.
+    validations:
+      required: false
