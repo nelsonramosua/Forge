@@ -284,6 +284,45 @@ func TestReconcileRunningDeploymentsMarksUnhealthyDeploymentFailed(t *testing.T)
 	assertDeploymentStatus(t, st, unhealthy.ID, "failed")
 }
 
+func TestReconcileRunningDeploymentsKeepsRunningDeploymentWhenAgentOffline(t *testing.T) {
+	ctx := context.Background()
+	srv, st := newDeploymentStateTestServer(t, "")
+	srv.cfg.OnlineWindow = time.Nanosecond
+	if err := st.UpsertAgent(ctx, store.Agent{
+		ID:       "worker-1",
+		Hostname: "worker-1",
+		Address:  "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	deployment := createDeploymentForStateTest(t, st, store.Deployment{
+		AppName:         "app",
+		RepoURL:         "https://github.com/example/app.git",
+		CommitSHA:       "1111111111111111111111111111111111111111",
+		Branch:          "main",
+		Status:          "running",
+		ConfigJSON:      testForgeConfigJSON(t, "app"),
+		AssignedAgentID: "worker-1",
+		Host:            "app.nforge.space",
+		TargetPort:      21001,
+	})
+
+	if err := srv.reconcileRunningDeployments(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	assertDeploymentStatus(t, st, deployment.ID, "running")
+	healthByID, err := st.DeploymentHealthObservationsByDeploymentIDs(ctx, []int64{deployment.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	health, ok := healthByID[deployment.ID]
+	if !ok || health.Status != "unhealthy" || health.Reason != "assigned agent is offline" {
+		t.Fatalf("expected offline health observation, got ok=%v health=%+v", ok, health)
+	}
+}
+
 func TestReconcileRunningDeploymentsDeletesRouteForAppWhenNoOtherRunningDeployments(t *testing.T) {
 	ctx := context.Background()
 

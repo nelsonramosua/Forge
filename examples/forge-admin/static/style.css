@@ -1,11 +1,13 @@
 :root {
-  --bg: #f6f3ed;
+  --bg: #f7f8fa;
   --fg: #172026;
-  --muted: #60707d;
-  --line: #d8d1c6;
+  --muted: #667888;
+  --line: #d8dee6;
   --panel: #ffffff;
   --accent: #0f766e;
-  --danger: #b91c1c;
+  --accent-dark: #115e59;
+  --danger: #b42318;
+  --danger-bg: #fff1f0;
 }
 * {
   box-sizing: border-box;
@@ -16,11 +18,12 @@ body {
   background: var(--bg);
   color: var(--fg);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
 }
 main {
-  width: min(1180px, calc(100% - 32px));
+  width: min(1280px, calc(100% - 32px));
   margin: 0 auto;
-  padding: 32px 0;
+  padding: 24px 0;
 }
 .login {
   width: min(420px, 100%);
@@ -30,74 +33,123 @@ main {
   border-radius: 8px;
   background: var(--panel);
 }
+h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+h2 {
+  margin-bottom: 0;
+  font-size: 1rem;
+}
+h3 {
+  margin: 18px 0 10px;
+  font-size: 0.95rem;
+}
 label {
-  display: block;
-  margin-bottom: 8px;
+  display: grid;
+  gap: 6px;
   color: var(--muted);
 }
 input,
+select,
 button {
-  width: 100%;
-  min-height: 42px;
+  min-height: 38px;
   border-radius: 6px;
   font: inherit;
 }
-input {
+input,
+select {
+  width: 100%;
   border: 1px solid var(--line);
+  background: white;
   padding: 8px 10px;
+  color: var(--fg);
 }
 button {
-  margin-top: 12px;
   border: 0;
   background: var(--accent);
   color: white;
+  padding: 0 12px;
   cursor: pointer;
+  white-space: nowrap;
 }
-.error {
-  min-height: 24px;
+button:hover {
+  background: var(--accent-dark);
+}
+button.danger {
+  background: var(--danger);
+}
+.login button {
+  width: 100%;
+  margin-top: 12px;
+}
+.error,
+#deploy-result {
+  min-height: 22px;
   color: var(--danger);
 }
 header,
+.panel-heading,
 .logs > div {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
 }
+header {
+  margin-bottom: 18px;
+}
 header p {
   margin: 4px 0 0;
   color: var(--muted);
 }
-header button,
-.logs button {
-  width: auto;
-  padding: 0 14px;
+.header-actions,
+.actions,
+.deployment-actions,
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
-.grid {
+.metrics {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
-  margin: 24px 0;
+  margin-bottom: 16px;
 }
-article {
+.metrics article,
+.panel {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
   padding: 16px;
-  overflow: auto;
 }
-article span {
+.metrics span {
   color: var(--muted);
 }
-article strong {
+.metrics strong {
   display: block;
   margin-top: 8px;
   color: var(--accent);
-  font-size: 2rem;
+  font-size: 1.9rem;
 }
-.panels {
+.workspace,
+.details {
   display: grid;
   gap: 16px;
+}
+.details {
+  margin-top: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.inline-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.5fr) minmax(120px, 0.7fr) minmax(180px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  margin-top: 12px;
 }
 table {
   width: 100%;
@@ -114,26 +166,60 @@ th {
   color: var(--muted);
   font-weight: 600;
 }
-tr[data-deployment-id] {
+tr[data-action] {
   cursor: pointer;
 }
-.logs {
-  margin-top: 16px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-  padding: 16px;
+a {
+  color: var(--accent);
+}
+dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 14px;
+  margin: 12px 0 0;
+}
+dt {
+  color: var(--muted);
+}
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 pre {
   max-height: 520px;
   overflow: auto;
   white-space: pre-wrap;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #101820;
+  color: #dbeafe;
+  padding: 12px;
 }
-@media (max-width: 760px) {
-  .grid {
+dialog {
+  width: min(420px, calc(100% - 32px));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 18px;
+}
+dialog::backdrop {
+  background: rgba(15, 23, 42, 0.45);
+}
+@media (max-width: 900px) {
+  main {
+    width: min(100% - 20px, 1280px);
+  }
+  .metrics,
+  .details,
+  .inline-form {
     grid-template-columns: 1fr;
   }
   header {
-    display: block;
+    align-items: flex-start;
+  }
+  table {
+    min-width: 760px;
+  }
+  .panel {
+    overflow: auto;
   }
 }

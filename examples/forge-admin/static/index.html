@@ -12,71 +12,134 @@
       <h1>Forge Admin</h1>
       <form id="login-form">
         <label for="password">Console password</label>
-        <input id="password" name="password" type="password" autocomplete="current-password">
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
         <button type="submit">Sign in</button>
       </form>
       <p id="login-error" class="error" role="alert"></p>
     </section>
+
     <section id="dashboard-view" class="dashboard" hidden>
       <header>
         <div>
           <strong>Forge Admin</strong>
-          <p>Production control plane</p>
+          <p id="connection-state">Connecting</p>
         </div>
-        <button id="logout" type="button">Sign out</button>
+        <div class="header-actions">
+          <button id="refresh" type="button">Refresh</button>
+          <button id="logout" type="button">Sign out</button>
+        </div>
       </header>
-      <section class="grid" aria-label="Summary">
-        <article>
-          <span>Workers</span>
-          <strong id="workers-count">-</strong>
-        </article>
-        <article>
-          <span>Apps</span>
-          <strong id="apps-count">-</strong>
-        </article>
-        <article>
-          <span>Deployments</span>
-          <strong id="deployments-count">-</strong>
-        </article>
+
+      <section class="metrics" aria-label="Summary">
+        <article><span>Workers</span><strong id="workers-count">-</strong></article>
+        <article><span>Apps</span><strong id="apps-count">-</strong></article>
+        <article><span>Deployments</span><strong id="deployments-count">-</strong></article>
+        <article><span>Failures</span><strong id="failed-count">-</strong></article>
       </section>
-      <section class="panels">
-        <article>
-          <h2>Workers</h2>
+
+      <section class="workspace">
+        <article class="panel">
+          <div class="panel-heading">
+            <h2>Deploy</h2>
+            <span id="deploy-result"></span>
+          </div>
+          <form id="deploy-form" class="inline-form">
+            <label>
+              Repository
+              <select id="deploy-repo" name="repo" required></select>
+            </label>
+            <label>
+              Branch
+              <input name="branch" value="main" required>
+            </label>
+            <label>
+              Commit SHA
+              <input name="commit_sha" placeholder="HEAD">
+            </label>
+            <button type="submit">Deploy</button>
+          </form>
+        </article>
+
+        <article class="panel">
+          <div class="panel-heading">
+            <h2>Repositories</h2>
+          </div>
           <table>
             <thead>
-              <tr><th>ID</th><th>Address</th><th>CPU</th><th>Memory</th></tr>
+              <tr><th>Repo</th><th>Credential</th><th>Actions</th></tr>
             </thead>
-            <tbody id="workers-table"></tbody>
+            <tbody id="repos-table"></tbody>
           </table>
         </article>
-        <article>
-          <h2>Apps</h2>
+
+        <article class="panel">
+          <div class="panel-heading">
+            <h2>Apps</h2>
+          </div>
           <table>
             <thead>
-              <tr><th>App</th><th>Latest status</th><th>Active deployment</th><th>Active status</th><th>Host</th></tr>
+              <tr><th>App</th><th>Status</th><th>Active</th><th>Health</th><th>Host</th><th>Actions</th></tr>
             </thead>
             <tbody id="apps-table"></tbody>
           </table>
         </article>
-        <article>
-          <h2>Recent Deployments</h2>
+
+        <article class="panel">
+          <div class="panel-heading">
+            <h2>Recent Deployments</h2>
+          </div>
           <table>
             <thead>
-              <tr><th>ID</th><th>App</th><th>Status</th><th>Branch</th></tr>
+              <tr><th>ID</th><th>App</th><th>Status</th><th>Branch</th><th>Commit</th><th>Actions</th></tr>
             </thead>
             <tbody id="deployments-table"></tbody>
           </table>
         </article>
       </section>
-      <section id="logs-panel" class="logs" hidden>
-        <div>
-          <h2 id="logs-title">Logs</h2>
-          <button id="close-logs" type="button">Close</button>
-        </div>
-        <pre id="logs-output"></pre>
+
+      <section class="details">
+        <article id="app-panel" class="panel" hidden>
+          <div class="panel-heading">
+            <h2 id="app-title">App</h2>
+            <button id="close-app" type="button">Close</button>
+          </div>
+          <dl id="app-meta"></dl>
+          <h3>Secrets</h3>
+          <form id="secret-form" class="inline-form">
+            <input name="key" placeholder="KEY" required>
+            <input name="value" placeholder="Value" type="password" required>
+            <button type="submit">Save secret</button>
+          </form>
+          <table>
+            <thead><tr><th>Key</th><th>Actions</th></tr></thead>
+            <tbody id="secrets-table"></tbody>
+          </table>
+        </article>
+
+        <article id="deployment-panel" class="panel" hidden>
+          <div class="panel-heading">
+            <h2 id="deployment-title">Deployment</h2>
+            <button id="close-deployment" type="button">Close</button>
+          </div>
+          <dl id="deployment-meta"></dl>
+          <div class="deployment-actions" id="deployment-actions"></div>
+          <pre id="logs-output"></pre>
+        </article>
       </section>
     </section>
   </main>
+
+  <dialog id="confirm-dialog">
+    <form method="dialog">
+      <h2 id="confirm-title">Confirm</h2>
+      <p id="confirm-message"></p>
+      <div class="dialog-actions">
+        <button id="confirm-cancel" value="cancel">Cancel</button>
+        <button id="confirm-ok" value="ok">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="/app.js"></script>
 </body>
 </html>

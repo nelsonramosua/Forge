@@ -112,6 +112,49 @@ func TestTaskPayloadDoesNotPersistRepoCredential(t *testing.T) {
 	}
 }
 
+func TestTaskEventEndpointsDoNotExposeTaskPayload(t *testing.T) {
+	_, handler, st := newRepoCredentialTestServer(t)
+	ctx := context.Background()
+	deployment, err := st.CreateDeployment(ctx, store.Deployment{
+		AppName:    "private",
+		RepoURL:    "https://github.com/example/private.git",
+		CommitSHA:  "0123456789abcdef0123456789abcdef01234567",
+		Branch:     "main",
+		Status:     "building",
+		ConfigJSON: "{}",
+		Host:       "private.nforge.space",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertAgent(ctx, store.Agent{ID: "worker-1", Hostname: "worker-1", Address: "127.0.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := st.CreateTask(ctx, store.Task{
+		DeploymentID: deployment.ID,
+		AgentID:      "worker-1",
+		Type:         "build",
+		Status:       "in_progress",
+		PayloadJSON:  `{"env":{"SECRET_TOKEN":"super-secret-value"},"request_id":"request-1"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventPath := "/api/v1/tasks/" + strconv.FormatInt(task.ID, 10) + "/events"
+	res := doJSON(handler, http.MethodPost, eventPath, `{"level":"info","message":"build started"}`, "agent-token")
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("POST event: expected %d, got %d body=%s", http.StatusAccepted, res.Code, res.Body.String())
+	}
+	logsPath := "/api/v1/deployments/" + strconv.FormatInt(deployment.ID, 10) + "/logs"
+	res = doJSON(handler, http.MethodGet, logsPath, "", "admin-token")
+	if res.Code != http.StatusOK {
+		t.Fatalf("GET logs: expected %d, got %d body=%s", http.StatusOK, res.Code, res.Body.String())
+	}
+	if strings.Contains(res.Body.String(), "super-secret-value") || strings.Contains(res.Body.String(), "SECRET_TOKEN") {
+		t.Fatalf("logs exposed task payload: %s", res.Body.String())
+	}
+}
+
 func TestAgentRepoCredentialLeaseIsScopedToClaimedTask(t *testing.T) {
 	srv, handler, st := newRepoCredentialTestServer(t)
 	ctx := context.Background()

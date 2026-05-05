@@ -6,6 +6,7 @@ import time
 import urllib.error
 import urllib.request
 from http.cookies import SimpleCookie
+from ipaddress import ip_address
 
 def control_plane_url() -> str:
     explicit_url = os.environ.get("FORGE_CONTROL_PLANE_URL", "").strip()
@@ -24,6 +25,11 @@ PORT = int(os.environ.get("PORT", 8000))
 SESSION_TTL_SECONDS = int(os.environ.get("FORGE_ADMIN_SESSION_TTL_SECONDS", 3600))
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 SESSIONS: dict[str, float] = {}
+FAILED_LOGINS: dict[str, dict[str, object]] = {}
+LOGIN_FAIL_LIMIT = 5
+LOGIN_FAIL_WINDOW_SECONDS = 60
+LOGIN_BLOCK_SECONDS = 900
+MAX_PROXY_BODY_BYTES = 1 << 20
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -69,6 +75,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self._send_json(401, {"error": "not authenticated"})
 
     def _handle_login(self):
+        client = self._client_ip()
+        if self._login_blocked(client):
+            self._send_json(429, {"error": "too many failed login attempts"})
+            return
         length = int(self.headers.get("Content-Length", 0))
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -79,8 +89,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         expected = CONSOLE_PASSWORD.encode()
         provided_bytes = provided.encode()
         if len(provided_bytes) != len(expected) or not secrets.compare_digest(provided_bytes, expected):
+            self._record_login_failure(client)
             self._send_json(401, {"error": "invalid credentials"})
             return
+        FAILED_LOGINS.pop(client, None)
         session_id = secrets.token_hex(32)
         SESSIONS[session_id] = time.time() + SESSION_TTL_SECONDS
         data = json.dumps({"status": "ok"}).encode()
@@ -121,19 +133,62 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         morsel = cookies.get("forge_session")
         return morsel.value if morsel else None
 
+    def _client_ip(self) -> str:
+        remote = self.client_address[0] if self.client_address else ""
+        try:
+            remote_ip = ip_address(remote)
+        except ValueError:
+            return remote or "unknown"
+        if remote_ip.is_loopback:
+            forwarded_for = self.headers.get("X-Forwarded-For", "")
+            first = forwarded_for.split(",", 1)[0].strip()
+            if first:
+                try:
+                    return str(ip_address(first))
+                except ValueError:
+                    pass
+        return str(remote_ip)
+
+    def _login_blocked(self, client: str) -> bool:
+        entry = FAILED_LOGINS.get(client)
+        if not entry:
+            return False
+        blocked_until = float(entry.get("blocked_until", 0))
+        if blocked_until > time.time():
+            return True
+        if blocked_until:
+            FAILED_LOGINS.pop(client, None)
+        return False
+
+    def _record_login_failure(self, client: str):
+        now = time.time()
+        entry = FAILED_LOGINS.setdefault(client, {"attempts": [], "blocked_until": 0})
+        attempts = [ts for ts in entry.get("attempts", []) if now - float(ts) <= LOGIN_FAIL_WINDOW_SECONDS]
+        attempts.append(now)
+        entry["attempts"] = attempts
+        if len(attempts) >= LOGIN_FAIL_LIMIT:
+            entry["blocked_until"] = now + LOGIN_BLOCK_SECONDS
+
     def _proxy_api(self):
         url = CP_URL + self.path
         length = int(self.headers.get("Content-Length", 0))
+        if length > MAX_PROXY_BODY_BYTES:
+            self._send_json(413, {"error": "request too large"})
+            return
         body = self.rfile.read(length) if length > 0 else None
+        headers = {"Authorization": "Bearer {}".format(ADMIN_TOKEN)}
+        content_type = self.headers.get("Content-Type")
+        if content_type:
+            headers["Content-Type"] = content_type
         request = urllib.request.Request(
             url,
             data=body,
             method=self.command,
-            headers={
-                "Authorization": "Bearer {}".format(ADMIN_TOKEN),
-                "Content-Type": self.headers.get("Content-Type", "application/json"),
-            },
+            headers=headers,
         )
+        if self.command == "GET" and self.path.startswith("/api/v1/events"):
+            self._proxy_stream(request)
+            return
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 data = response.read()
@@ -151,6 +206,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(data)
+        except urllib.error.URLError:
+            self._send_json(502, {"error": "control plane unavailable"})
+
+    def _proxy_stream(self, request):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                self.send_response(response.status)
+                self.send_header("Content-Type", response.headers.get("Content-Type", "text/event-stream"))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                while True:
+                    data = response.read(4096)
+                    if not data:
+                        break
+                    self.wfile.write(data)
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except urllib.error.URLError:
+            return
 
     def _send_json(self, status: int, body: dict):
         data = json.dumps(body).encode()

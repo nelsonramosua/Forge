@@ -331,8 +331,13 @@ All admin endpoints require `Authorization: Bearer $FORGE_ADMIN_TOKEN`. Agent en
 | `GET` | `/api/v1/agents` | admin | List online agents |
 | `GET` | `/api/v1/apps` | admin | List the latest deployment per app |
 | `GET` | `/api/v1/deployments` | admin | List recent deployments (last 100) |
+| `POST` | `/api/v1/deployments` | admin | Trigger a manual deployment from an allowed repo/branch |
+| `POST` | `/api/v1/deployments/{id}/rollback` | admin | Create a new deployment from a previous deployment commit |
+| `POST` | `/api/v1/deployments/{id}/retry` | admin | Requeue a failed or stopped deployment |
+| `DELETE` | `/api/v1/deployments/{id}` | admin | Cancel pending work or stop a running deployment |
 | `PUT` | `/api/v1/apps/{app}/secrets/{key}` | admin | Encrypt and store a secret |
 | `GET` | `/api/v1/apps/{app}/secrets` | admin | List secret key names (not values) |
+| `GET` | `/api/v1/repos` | admin | List allowed repos and credential status |
 | `PUT` | `/api/v1/repos/{owner}/{repo}/credential` | admin | Store an encrypted GitHub repo token |
 | `GET` | `/api/v1/repos/{owner}/{repo}/credential` | admin | Check whether a repo credential exists |
 | `DELETE` | `/api/v1/repos/{owner}/{repo}/credential` | admin | Delete a repo credential |

@@ -48,6 +48,7 @@ const (
 	deploymentRetryBaseDelay    = 30 * time.Second
 	deploymentRetryMaxDelay     = 15 * time.Minute
 	deploymentRetryMaxAttempts  = 3
+	manualDeployCloneTimeout    = 20 * time.Second
 	deploymentPortProbeTimeout  = 200 * time.Millisecond
 )
 
@@ -164,6 +165,7 @@ func (s *Server) routes(ctx context.Context) http.Handler {
 		s.hub.serve(ctx, w, r)
 	})
 	mux.HandleFunc("/api/v1/webhook/github", s.handleGitHubWebhook)
+	mux.HandleFunc("/api/v1/repos", s.handleRepos)
 	mux.HandleFunc("/api/v1/repos/", s.handleRepoSubroutes)
 	mux.HandleFunc("/api/v1/agents", s.handleListAgents)
 	mux.HandleFunc("/api/v1/agents/register", s.handleAgentRegister)
@@ -238,11 +240,15 @@ func (s *Server) handlePublicStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeployments(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
 	}
 	if !s.authorizeAdmin(w, r) {
+		return
+	}
+	if r.Method == http.MethodPost {
+		s.handleManualDeploymentCreate(w, r)
 		return
 	}
 	deployments, err := s.store.ListDeployments(r.Context(), 100)
@@ -261,6 +267,39 @@ func (s *Server) handleDeployments(w http.ResponseWriter, r *http.Request) {
 		applyDeploymentHealth(&views[len(views)-1], healthByID[deployment.ID])
 	}
 	writeJSON(w, http.StatusOK, views)
+}
+
+func (s *Server) handleManualDeploymentCreate(w http.ResponseWriter, r *http.Request) {
+	var req manualDeploymentCreateRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	repoFullName, ok := s.allowedRepoName(strings.TrimSpace(req.Repo))
+	if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "repository is not allowed"})
+		return
+	}
+	branch := strings.TrimSpace(req.Branch)
+	if branch == "" {
+		branch = "main"
+	}
+	if !s.branchAllowed(branch) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "branch is not allowed"})
+		return
+	}
+	commit := strings.TrimSpace(req.CommitSHA)
+	if commit != "" && !validCommitSHA(commit) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid commit sha"})
+		return
+	}
+	repoURL := "https://github.com/" + repoFullName + ".git"
+	deployment, err := s.createDeploymentFromRepo(r.Context(), repoURL, repoFullName, branch, commit, manualDeployCloneTimeout)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, toDeploymentView(deployment))
 }
 
 func (s *Server) handleDeploymentSubroutes(w http.ResponseWriter, r *http.Request) {
@@ -328,9 +367,42 @@ func (s *Server) handleDeploymentSubroutes(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		s.handleDeploymentRetry(w, r, deploymentID)
+	case "rollback":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		s.handleDeploymentRollback(w, r, deploymentID)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) handleDeploymentRollback(w http.ResponseWriter, r *http.Request, deploymentID int64) {
+	source, ok, err := s.store.GetDeployment(r.Context(), deploymentID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if !validCommitSHA(source.CommitSHA) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "source deployment has no valid commit sha"})
+		return
+	}
+	repoFullName := repoFullNameFromURL(source.RepoURL)
+	if repoFullName == "" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "source deployment repo url is not supported"})
+		return
+	}
+	deployment, err := s.createDeploymentFromRepo(r.Context(), source.RepoURL, repoFullName, source.Branch, source.CommitSHA, manualDeployCloneTimeout)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, toDeploymentView(deployment))
 }
 
 func (s *Server) handleDeploymentRetry(w http.ResponseWriter, r *http.Request, deploymentID int64) {
@@ -448,6 +520,26 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		views = append(views, view)
 	}
 	writeJSON(w, http.StatusOK, views)
+}
+
+func (s *Server) handleRepos(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	if !s.authorizeAdmin(w, r) {
+		return
+	}
+	repos := make([]repoView, 0, len(s.cfg.AllowedRepos))
+	for _, repo := range s.cfg.AllowedRepos {
+		hasCredential, err := s.store.HasRepoCredential(r.Context(), repo)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		repos = append(repos, repoView{Repo: repo, HasCredential: hasCredential})
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"repos": repos})
 }
 
 func (s *Server) handleRepoSubroutes(w http.ResponseWriter, r *http.Request) {
@@ -603,7 +695,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	appConfig, err := s.cloneAndParseForgeYAML(r.Context(), repoURL, repoFullName, branch, payload.After)
+	appConfig, resolvedCommit, err := s.cloneAndParseForgeYAML(r.Context(), repoURL, repoFullName, branch, payload.After)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -622,7 +714,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	deployment, err := s.store.CreateDeployment(r.Context(), store.Deployment{
 		AppName:    appConfig.Name,
 		RepoURL:    repoURL,
-		CommitSHA:  payload.After,
+		CommitSHA:  resolvedCommit,
 		Branch:     branch,
 		Status:     "pending",
 		ConfigJSON: string(configJSON),
@@ -1252,6 +1344,13 @@ func (s *Server) reconcileRunningDeployments(ctx context.Context) error {
 			}
 			continue
 		}
+		if preserveRunningDeploymentOnHealthFailure(reason) {
+			log.Printf("deployment %d (%s) health is degraded but deployment remains running: %s", deployment.ID, deployment.AppName, reason)
+			if err := s.store.SetDeploymentHealthObservation(ctx, deployment.ID, "unhealthy", reason); err != nil {
+				return err
+			}
+			continue
+		}
 		log.Printf("deployment %d (%s) marked failed after health reconciliation: %s", deployment.ID, deployment.AppName, reason)
 		if err := s.markDeploymentFailed(ctx, deployment, reason, true); err != nil {
 			return err
@@ -1334,6 +1433,15 @@ func (s *Server) deploymentHealthy(ctx context.Context, deployment store.Deploym
 		}
 	}
 	return false, lastReason, nil
+}
+
+func preserveRunningDeploymentOnHealthFailure(reason string) bool {
+	switch reason {
+	case "assigned agent is offline", "assigned agent is missing":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseDeploymentConfig(configJSON string) (forgeyaml.Config, string) {
@@ -1869,24 +1977,60 @@ func chooseDeploymentPort(deploymentID int64, used map[int]bool, start int, end 
 	return 0, fmt.Errorf("no free app ports in range %d-%d", start, end)
 }
 
-func (s *Server) cloneAndParseForgeYAML(ctx context.Context, repoURL string, repoFullName string, branch string, commit string) (forgeyaml.Config, error) {
+func (s *Server) createDeploymentFromRepo(ctx context.Context, repoURL string, repoFullName string, branch string, commit string, timeout time.Duration) (store.Deployment, error) {
+	appConfig, resolvedCommit, err := s.cloneParseResolveForgeYAML(ctx, repoURL, repoFullName, branch, commit, timeout)
+	if err != nil {
+		return store.Deployment{}, err
+	}
+	subdomain := sanitizeHost(appConfig.Name)
+	if err := s.validateReservedSubdomain(subdomain, repoFullName, appConfig.Name); err != nil {
+		return store.Deployment{}, err
+	}
+	configJSON, err := json.Marshal(appConfig)
+	if err != nil {
+		return store.Deployment{}, err
+	}
+	deployment, err := s.store.CreateDeployment(ctx, store.Deployment{
+		AppName:    appConfig.Name,
+		RepoURL:    repoURL,
+		CommitSHA:  resolvedCommit,
+		Branch:     branch,
+		Status:     "pending",
+		ConfigJSON: string(configJSON),
+		Host:       subdomain + "." + strings.TrimPrefix(s.cfg.BaseDomain, "."),
+	})
+	if err != nil {
+		return store.Deployment{}, err
+	}
+	s.hub.publish("deployment", deployment)
+	return deployment, nil
+}
+
+func (s *Server) cloneAndParseForgeYAML(ctx context.Context, repoURL string, repoFullName string, branch string, commit string) (forgeyaml.Config, string, error) {
+	return s.cloneParseResolveForgeYAML(ctx, repoURL, repoFullName, branch, commit, 2*time.Minute)
+}
+
+func (s *Server) cloneParseResolveForgeYAML(ctx context.Context, repoURL string, repoFullName string, branch string, commit string, timeout time.Duration) (forgeyaml.Config, string, error) {
 	target := filepath.Join(s.cfg.WorkDir, "repos", strconv.FormatInt(time.Now().UnixNano(), 10))
 	defer func() { _ = os.RemoveAll(target) }()
 	if err := os.MkdirAll(filepath.Dir(target), 0750); err != nil {
-		return forgeyaml.Config{}, err
+		return forgeyaml.Config{}, "", err
 	}
-	cloneCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	cloneCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	gitEnv := os.Environ()
 	token, err := s.resolveRepoToken(ctx, repoFullName)
 	if err != nil {
-		return forgeyaml.Config{}, err
+		return forgeyaml.Config{}, "", err
 	}
 	if token != "" {
 		askpassPath, cleanup, err := writeAskpassHelper()
 		if err != nil {
-			return forgeyaml.Config{}, fmt.Errorf("askpass setup: %w", err)
+			return forgeyaml.Config{}, "", fmt.Errorf("askpass setup: %w", err)
 		}
 		defer cleanup()
 		gitEnv = append(gitEnv,
@@ -1898,31 +2042,58 @@ func (s *Server) cloneAndParseForgeYAML(ctx context.Context, repoURL string, rep
 	}
 
 	// #nosec G204 -- branch and repoURL are validated before git sees them, and -- prevents repoURL from being parsed as a flag.
-	cmd := exec.CommandContext(cloneCtx, "git", "clone", "--depth=1", "--branch", branch, "--", repoURL, target)
+	cmd := exec.CommandContext(cloneCtx, "git", "clone", "--depth=1", "--branch", branch, "--no-checkout", "--", repoURL, target)
 	cmd.Env = gitEnv
 	if output, err := cmd.CombinedOutput(); err != nil {
 		_ = output
 		if token == "" {
-			return forgeyaml.Config{}, fmt.Errorf("git clone failed for %s; if this repository is private, register a credential first", repoFullName)
+			return forgeyaml.Config{}, "", fmt.Errorf("git clone failed for %s; if this repository is private, register a credential first", repoFullName)
 		}
-		return forgeyaml.Config{}, fmt.Errorf("git clone failed for %s; verify the registered credential", repoFullName)
+		return forgeyaml.Config{}, "", fmt.Errorf("git clone failed for %s; verify the registered credential", repoFullName)
 	}
 	if commit != "" {
 		if !validCommitSHA(commit) {
-			return forgeyaml.Config{}, fmt.Errorf("invalid commit sha")
+			return forgeyaml.Config{}, "", fmt.Errorf("invalid commit sha")
+		}
+		fetch := exec.CommandContext(cloneCtx, "git", "-C", target, "fetch", "--depth=1", "origin", commit) // #nosec G204 -- commit is restricted to a hex object id.
+		fetch.Env = gitEnv
+		if output, err := fetch.CombinedOutput(); err != nil {
+			_ = output
+			return forgeyaml.Config{}, "", fmt.Errorf("git fetch failed for %s", repoFullName)
 		}
 		checkout := exec.CommandContext(cloneCtx, "git", "-C", target, "checkout", "--detach", commit) // #nosec G204 -- commit is restricted to a hex object id.
 		checkout.Env = gitEnv
 		if output, err := checkout.CombinedOutput(); err != nil {
 			_ = output
-			return forgeyaml.Config{}, fmt.Errorf("git checkout failed for %s", repoFullName)
+			return forgeyaml.Config{}, "", fmt.Errorf("git checkout failed for %s", repoFullName)
 		}
+	} else {
+		checkout := exec.CommandContext(cloneCtx, "git", "-C", target, "checkout", "--detach", "HEAD")
+		checkout.Env = gitEnv
+		if output, err := checkout.CombinedOutput(); err != nil {
+			_ = output
+			return forgeyaml.Config{}, "", fmt.Errorf("git checkout failed for %s", repoFullName)
+		}
+	}
+	revParse := exec.CommandContext(cloneCtx, "git", "-C", target, "rev-parse", "HEAD")
+	revParse.Env = gitEnv
+	output, err := revParse.Output()
+	if err != nil {
+		return forgeyaml.Config{}, "", fmt.Errorf("git rev-parse failed for %s", repoFullName)
+	}
+	resolvedCommit := strings.TrimSpace(string(output))
+	if !validCommitSHA(resolvedCommit) {
+		return forgeyaml.Config{}, "", fmt.Errorf("resolved commit sha is invalid")
 	}
 	data, err := os.ReadFile(filepath.Join(target, "forge.yaml")) // #nosec G304 -- target is a freshly created clone directory under the configured work dir.
 	if err != nil {
-		return forgeyaml.Config{}, fmt.Errorf("read forge.yaml: %w", err)
+		return forgeyaml.Config{}, "", fmt.Errorf("read forge.yaml: %w", err)
 	}
-	return forgeyaml.Parse(data)
+	appConfig, err := forgeyaml.Parse(data)
+	if err != nil {
+		return forgeyaml.Config{}, "", err
+	}
+	return appConfig, resolvedCommit, nil
 }
 
 func (s *Server) resolveRepoToken(ctx context.Context, repoFullName string) (string, error) {
@@ -2299,6 +2470,11 @@ type deploymentView struct {
 	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
+type repoView struct {
+	Repo          string `json:"repo"`
+	HasCredential bool   `json:"has_credential"`
+}
+
 func methodNotAllowed(w http.ResponseWriter) {
 	writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 }
@@ -2312,6 +2488,12 @@ type githubPushPayload struct {
 		URL      string `json:"url"`
 		FullName string `json:"full_name"`
 	} `json:"repository"`
+}
+
+type manualDeploymentCreateRequest struct {
+	Repo      string `json:"repo"`
+	Branch    string `json:"branch"`
+	CommitSHA string `json:"commit_sha"`
 }
 
 type agentRegisterRequest struct {

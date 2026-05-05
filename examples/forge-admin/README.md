@@ -5,6 +5,8 @@ This directory contains the bundled Forge admin console example. It is a small P
 ## What it does
 
 - Serves a login screen and a dashboard for workers, apps, and recent deployments.
+- Triggers manual deploys, redeploys branch HEAD, retries failed/stopped deployments, rolls back to previous commits, and stops/cancels deployments.
+- Manages app secret keys and GitHub repo credentials without displaying stored values.
 - Proxies authenticated requests to the control plane using `FORGE_ADMIN_TOKEN`.
 - Uses `FORGE_ADMIN_CONSOLE_PASSWORD` for browser login and stores a session cookie in the browser.
 - Exposes `/health` for Forge health checks.
