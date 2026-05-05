@@ -8,9 +8,9 @@
       aarch64: arm64
       arm64: arm64
     forge_go_checksum_map:
-      "1.25.9":
-        amd64: 00859d7bd6defe8bf84d9db9e57b9a4467b2887c18cd93ae7460e713db774bc1
-        arm64: ec342e7389b7f489564ed5463c63b16cf8040023dabc7861256677165a8c0e2b
+      "1.26.2":
+        amd64: 990e6b4bbba816dc3ee129eaeaf4b42f17c2800b88a2166c265ac1a200262282
+        arm64: c958a1fe1b361391db163a485e21f5f228142d6f8b584f6bef89b26f66dc5b23
 
 - name: Validate Go download architecture
   ansible.builtin.assert:

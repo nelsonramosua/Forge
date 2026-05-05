@@ -24,7 +24,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.25.9"
+          go-version: "1.26.2"
           cache: true
 
       - name: go vet
@@ -119,7 +119,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.25.9"
+          go-version: "1.26.2"
           cache: true
 
       - name: gosec
@@ -222,7 +222,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.25.9"
+          go-version: "1.26.2"
           cache: true
 
       - name: Build validator
@@ -285,7 +285,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.25.9"
+          go-version: "1.26.2"
           cache: true
 
       - name: Install build deps

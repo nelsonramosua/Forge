@@ -21,10 +21,13 @@
 1. Fix the application repository or secret values.
 2. Store missing secrets:
    `curl -X PUT -H "Authorization: Bearer $FORGE_ADMIN_TOKEN" -H "Content-Type: application/json" -d '{"value":"..."}' http://CONTROL_PLANE:8080/api/v1/apps/APP/secrets/KEY`
-3. Push a new commit to trigger a fresh deployment.
+3. If the deployment was marked failed with retryable state, requeue it directly:
+   `curl -X POST -H "Authorization: Bearer $FORGE_ADMIN_TOKEN" http://CONTROL_PLANE:8080/api/v1/deployments/DEPLOYMENT_ID/retry`
+4. Push a new commit to trigger a fresh deployment.
 
 ## Prevention
 
 - Keep health checks cheap and deterministic.
 - Prefer explicit runtime versions in `forge.yaml`.
 - Set memory and CPU limits high enough for build spikes, not only steady-state runtime.
+- Expect route rollback on failed health reconciliation; verify the latest successful deployment is still running before re-pushing.

@@ -8,8 +8,8 @@ make build
 make test
 go test -race ./...
 go vet ./...
-./bin/forge-build-runner --workdir /tmp --cgroup smoke -- /bin/true
-./bin/forge-build-runner --require-isolation --workdir /tmp --cgroup strict-smoke -- /bin/true
+./bin/forge-build-runner --workdir /tmp --cgroup smoke -- /bin/sh -lc /bin/true
+./bin/forge-build-runner --require-isolation --workdir /tmp --cgroup strict-smoke -- /bin/sh -lc /bin/true
 ```
 
 Run the local end-to-end harness:
@@ -18,7 +18,7 @@ Run the local end-to-end harness:
 scripts/e2e-local.sh
 ```
 
-The local E2E test starts a temporary control plane and agent, creates a temporary Git repo with `forge.yaml`, sends a signed GitHub-style webhook, and waits for the deployment to become `running`.
+The local E2E test starts a temporary control plane and agent, creates a temporary Git repo with `forge.yaml`, sends a signed GitHub-style webhook, and waits for the deployment to become `running`. It also exercises the current port-assignment and route-reconciliation path.
 
 Security checks covered by unit/E2E tests:
 

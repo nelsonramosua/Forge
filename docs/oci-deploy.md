@@ -176,6 +176,8 @@ forge_allowed_branches:
 
 The control plane intentionally refuses to start without secrets and at least one allowed repository.
 
+The bundled admin console lives in `examples/forge-admin`. To deploy it on OCI, publish that repository, set `forge_admin_app_repo` in your Ansible vars to that repo, and deploy an app whose `forge.yaml` uses `name: admin`. Private repository credentials are still registered through the control plane admin API after the deploy is up.
+
 ## 4. Ansible
 
 Run Ansible through the generated inventory. The worker is reached via SSH ProxyJump through the control-plane VM.

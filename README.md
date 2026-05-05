@@ -16,7 +16,9 @@ Think of it as a stripped-down Render or Fly.io that you own entirely: one serve
    - Starts the application process.
    - Runs health checks to confirm it is live.
    - Updates the reverse proxy so traffic reaches it at `your-app.yourdomain.com`.
-4. Logs stream in real time. If the health checks fail, Forge rolls back to the previous deployment automatically.
+4. Logs stream in real time. If the health checks fail, Forge marks the deployment failed, records retry state, and rolls back the route to the last healthy deployment when one exists.
+
+Forge also exposes a public status page at `/`, a public aggregate status endpoint at `/api/v1/status`, and a reserved `admin` subdomain for the bundled admin console example in `examples/forge-admin`.
 
 That is the entire lifecycle. No containers, no Kubernetes, no Docker daemon — just Linux processes, cgroups, and a Go binary orchestrating everything.
 
@@ -171,6 +173,8 @@ If health checks fail: agent kills the process (SIGTERM -> 5s -> SIGKILL), repor
 | `forgeyaml` | `gopkg.in/yaml.v3` parser with `KnownFields(true)` + full validation |
 | `config` | Env-var loader; startup fails closed if any required secret is missing |
 
+The control plane scheduler now also sweeps stale deployments and tasks, records health observations for running deployments, and keeps retry state for retryable failures so the latest failed deployment can be requeued safely.
+
 The scheduler runs as a goroutine on a 2-second ticker. It selects pending deployments, scores online agents by `free_cpu + free_memory_GB`, and assigns the highest-scoring one that meets the resource requirements. The task poll endpoint uses long-polling (25s default) so agents get work within milliseconds of it being created.
 
 Agent and admin tokens are compared with `crypto/subtle.ConstantTimeCompare` to prevent timing attacks. GitHub webhook signatures are verified with `crypto/hmac`.
@@ -214,6 +218,8 @@ Caddy is configured at startup via `infra/ansible/templates/Caddyfile.j2` with `
 ```
 
 The `@id` field allows idempotent updates — the existing route for that app is removed before inserting the new one. The `/api/v1/tls/ask` endpoint gates On-Demand TLS issuance: Caddy only requests a certificate for a domain if the control plane confirms it has a running deployment.
+
+For Cloudflare-hosted zones, you can enable DNS-01 automation with `forge_caddy_dns_cloudflare_enabled=true` and `vault_cloudflare_api_token` in Ansible vault. This removes ACME dependency on public reachability of ports `80` and `443` during certificate validation.
 
 ### Observability
 
@@ -320,10 +326,16 @@ All admin endpoints require `Authorization: Bearer $FORGE_ADMIN_TOKEN`. Agent en
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `/api/v1/webhook/github` | webhook HMAC | Trigger a deployment from a GitHub push event |
+| `GET` | `/api/v1/status` | none | Public aggregate status for the base landing page |
 | `GET` | `/api/v1/events` | admin | SSE stream of deployment and log events |
+| `GET` | `/api/v1/agents` | admin | List online agents |
+| `GET` | `/api/v1/apps` | admin | List the latest deployment per app |
 | `GET` | `/api/v1/deployments` | admin | List recent deployments (last 100) |
 | `PUT` | `/api/v1/apps/{app}/secrets/{key}` | admin | Encrypt and store a secret |
 | `GET` | `/api/v1/apps/{app}/secrets` | admin | List secret key names (not values) |
+| `PUT` | `/api/v1/repos/{owner}/{repo}/credential` | admin | Store an encrypted GitHub repo token |
+| `GET` | `/api/v1/repos/{owner}/{repo}/credential` | admin | Check whether a repo credential exists |
+| `DELETE` | `/api/v1/repos/{owner}/{repo}/credential` | admin | Delete a repo credential |
 | `GET` | `/healthz` | none | Control plane health check |
 | `GET` | `/metrics` | loopback or admin | Prometheus metrics |
 
@@ -339,6 +351,8 @@ All admin endpoints require `Authorization: Bearer $FORGE_ADMIN_TOKEN`. Agent en
 | `FORGE_GITHUB_WEBHOOK_SECRET` | YES | — | GitHub webhook secret for HMAC-SHA256 verification |
 | `FORGE_ALLOWED_REPOS` | YES | — | Comma-separated `owner/repo` allowlist |
 | `FORGE_ALLOWED_BRANCHES` | — | `main` | Comma-separated branch allowlist |
+| `FORGE_ADMIN_APP_NAME` | — | `admin` | App name reserved for the Forge admin console |
+| `FORGE_ADMIN_APP_REPO` | — | — | `owner/repo` allowed to deploy the reserved `admin` subdomain |
 | `FORGE_BASE_DOMAIN` | — | `forge.localhost` | Base domain for app subdomains |
 | `FORGE_ADDR` | — | `:8080` | Control plane listen address |
 | `FORGE_DB_PATH` | — | `data/forge.db` | SQLite database path |
@@ -351,6 +365,27 @@ All admin endpoints require `Authorization: Bearer $FORGE_ADMIN_TOKEN`. Agent en
 | `FORGE_REQUIRE_ISOLATION` | — | `false` (`true` in prod) | Agent: fail build if Linux namespaces unavailable |
 | `FORGE_BUILD_TIMEOUT` | — | `0` (disabled) | Agent: max build time in seconds |
 | `FORGE_AGENT_POLL_SECONDS` | — | `2` | Agent: task poll interval |
+
+---
+
+### Private Repositories
+
+Forge stores private repository credentials encrypted at rest. Register a credential for an allowed repo:
+
+```sh
+curl -X PUT "https://$FORGE_BASE_DOMAIN/api/v1/repos/OWNER/REPO/credential" \
+  -H "Authorization: Bearer $FORGE_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"token":"github_pat_..."}'
+```
+
+The clean `https://github.com/OWNER/REPO.git` URL remains in deployments and task payloads. Agents request
+the credential only when they need to clone/fetch the assigned task, and the token is passed to `git`
+through `GIT_ASKPASS`, not through command arguments.
+
+The `admin` subdomain is reserved. To deploy the bundled admin console at `admin.$FORGE_BASE_DOMAIN`,
+set `FORGE_ADMIN_APP_REPO` to the console app repository and deploy an app whose `forge.yaml` uses
+`name: admin`.
 
 ---
 
@@ -391,6 +426,7 @@ Forge/
 │       ├── store/          # SQLite store + schema
 │       └── vault/          # AES-256-GCM encryption
 ├── examples/
+│   ├── forge-admin/        # Python stdlib admin console for Forge
 │   ├── release-board/      # Python/FastAPI status page
 │   ├── mission-control/    # Python deployment dashboard
 │   └── signal-hub/         # Go WebSocket hub

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Forge Admin</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <section id="login-view" class="login">
+      <h1>Forge Admin</h1>
+      <form id="login-form">
+        <label for="password">Console password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password">
+        <button type="submit">Sign in</button>
+      </form>
+      <p id="login-error" class="error" role="alert"></p>
+    </section>
+    <section id="dashboard-view" class="dashboard" hidden>
+      <header>
+        <div>
+          <strong>Forge Admin</strong>
+          <p>Production control plane</p>
+        </div>
+        <button id="logout" type="button">Sign out</button>
+      </header>
+      <section class="grid" aria-label="Summary">
+        <article>
+          <span>Workers</span>
+          <strong id="workers-count">-</strong>
+        </article>
+        <article>
+          <span>Apps</span>
+          <strong id="apps-count">-</strong>
+        </article>
+        <article>
+          <span>Deployments</span>
+          <strong id="deployments-count">-</strong>
+        </article>
+      </section>
+      <section class="panels">
+        <article>
+          <h2>Workers</h2>
+          <table>
+            <thead>
+              <tr><th>ID</th><th>Address</th><th>CPU</th><th>Memory</th></tr>
+            </thead>
+            <tbody id="workers-table"></tbody>
+          </table>
+        </article>
+        <article>
+          <h2>Apps</h2>
+          <table>
+            <thead>
+              <tr><th>App</th><th>Latest status</th><th>Active deployment</th><th>Active status</th><th>Host</th></tr>
+            </thead>
+            <tbody id="apps-table"></tbody>
+          </table>
+        </article>
+        <article>
+          <h2>Recent Deployments</h2>
+          <table>
+            <thead>
+              <tr><th>ID</th><th>App</th><th>Status</th><th>Branch</th></tr>
+            </thead>
+            <tbody id="deployments-table"></tbody>
+          </table>
+        </article>
+      </section>
+      <section id="logs-panel" class="logs" hidden>
+        <div>
+          <h2 id="logs-title">Logs</h2>
+          <button id="close-logs" type="button">Close</button>
+        </div>
+        <pre id="logs-output"></pre>
+      </section>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

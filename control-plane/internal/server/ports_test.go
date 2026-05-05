@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -45,6 +46,37 @@ func TestChooseDeploymentPortFull(t *testing.T) {
 	_, err := chooseDeploymentPort(1, map[int]bool{20000: true, 20001: true}, 20000, 20001)
 	if err == nil {
 		t.Fatal("expected error for full port range")
+	}
+}
+
+func TestChooseDeploymentPortForAgentSkipsBoundPort(t *testing.T) {
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	port := listener.Addr().(*net.TCPAddr).Port
+	start := port
+	end := port + 1
+	if port == 65535 {
+		start = port - 1
+		end = port
+	}
+	chosen, err := chooseDeploymentPortForAgent(1, map[int]bool{}, start, end, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chosen == port {
+		t.Fatalf("expected bound port %d to be skipped", port)
+	}
+	if port == 65535 {
+		if chosen != port-1 {
+			t.Fatalf("expected fallback port %d, got %d", port-1, chosen)
+		}
+		return
+	}
+	if chosen != port+1 {
+		t.Fatalf("expected fallback port %d, got %d", port+1, chosen)
 	}
 }
 
@@ -105,6 +137,12 @@ func TestTLSAskAllowsBaseDomainAndRunningDeploymentHost(t *testing.T) {
 		Host:      "release-board.nforge.space",
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateDeploymentAssignment(ctx, deployment.ID, "worker-1", "building"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateDeploymentStatus(ctx, deployment.ID, "deploying"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.MarkDeploymentRunning(ctx, deployment.ID, 20000); err != nil {

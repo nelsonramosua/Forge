@@ -29,11 +29,15 @@ The worker service runs as the unprivileged `forge` user. Build and run commands
 The systemd unit also denies access to common instance metadata addresses, so application commands should not be able to read cloud metadata from the worker.
 Production workers set `FORGE_REQUIRE_ISOLATION=true`, which makes build tasks fail closed if the build runner cannot create Linux namespaces.
 
+The control plane now also serves a public landing page and `/api/v1/status`, stores encrypted repo credentials per allowed `owner/repo`, and reserves the `admin` subdomain for the bundled Forge admin console when `FORGE_ADMIN_APP_REPO` is configured.
+
 ## Ports
 
 Apps should bind to `$PORT`. Forge allocates a unique host port per deployment from `FORGE_APP_PORT_START..FORGE_APP_PORT_END` and injects it into the run environment.
 
 The `run.port` value in `forge.yaml` is kept as a manifest/default port, but the platform may assign a different host port to avoid collisions with other apps.
+
+When a host port is already bound on the worker, Forge probes that address before assigning it and picks the next free port instead. This keeps port allocation aligned with the actual worker host state.
 
 Default range:
 

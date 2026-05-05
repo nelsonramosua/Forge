@@ -2,6 +2,8 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
+data "aws_caller_identity" "current" {}
+
 data "aws_ami" "ubuntu_jammy_x86" {
   most_recent = true
   owners      = ["099720109477"]
@@ -32,10 +34,15 @@ data "aws_ami" "ubuntu_jammy_arm64" {
   }
 }
 
+data "aws_partition" "current" {}
+
+data "aws_region" "current" {}
+
 locals {
-  control_plane_arch = startswith(var.control_plane_instance_type, "t4g.") ? "arm64" : "x86_64"
-  worker_arch        = startswith(var.worker_instance_type, "t4g.") ? "arm64" : "x86_64"
-  ssh_private_key    = var.ssh_private_key_path != "" ? var.ssh_private_key_path : trimsuffix(var.ssh_public_key_path, ".pub")
+  control_plane_arch           = startswith(var.control_plane_instance_type, "t4g.") ? "arm64" : "x86_64"
+  worker_arch                  = startswith(var.worker_instance_type, "t4g.") ? "arm64" : "x86_64"
+  ssh_private_key              = var.ssh_private_key_path != "" ? var.ssh_private_key_path : trimsuffix(var.ssh_public_key_path, ".pub")
+  vpc_flow_logs_log_group_name = "/forge/vpc-flow-logs"
 
   common_tags = {
     Project = "Forge"
@@ -49,6 +56,134 @@ resource "aws_vpc" "forge" {
 
   tags = merge(local.common_tags, {
     Name = "forge-vpc"
+  })
+}
+
+data "aws_iam_policy_document" "vpc_flow_logs_assume_role" {
+  statement {
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["vpc-flow-logs.amazonaws.com"]
+    }
+
+    actions = ["sts:AssumeRole"]
+  }
+}
+
+resource "aws_cloudwatch_log_group" "vpc_flow_logs" {
+  name              = local.vpc_flow_logs_log_group_name
+  kms_key_id        = aws_kms_key.vpc_flow_logs.arn
+  retention_in_days = 30
+
+  tags = merge(local.common_tags, {
+    Name = "forge-vpc-flow-logs"
+  })
+}
+
+data "aws_iam_policy_document" "vpc_flow_logs_kms" {
+  statement {
+    sid     = "AllowAccountAdministration"
+    effect  = "Allow"
+    actions = ["kms:*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "AllowCloudWatchLogsUse"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["logs.${data.aws_region.current.name}.${data.aws_partition.current.dns_suffix}"]
+    }
+
+    actions = [
+      "kms:Decrypt",
+      "kms:DescribeKey",
+      "kms:Encrypt",
+      "kms:GenerateDataKey*",
+      "kms:ReEncrypt*",
+    ]
+
+    resources = ["*"]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "kms:EncryptionContext:aws:logs:arn"
+      values = [format(
+        "arn:%s:logs:%s:%s:log-group:%s",
+        data.aws_partition.current.partition,
+        data.aws_region.current.name,
+        data.aws_caller_identity.current.account_id,
+        local.vpc_flow_logs_log_group_name,
+      )]
+    }
+  }
+}
+
+resource "aws_kms_key" "vpc_flow_logs" {
+  description         = "CMK for Forge VPC Flow Logs"
+  enable_key_rotation = true
+  policy              = data.aws_iam_policy_document.vpc_flow_logs_kms.json
+
+  tags = merge(local.common_tags, {
+    Name = "forge-vpc-flow-logs-kms"
+  })
+}
+
+data "aws_iam_policy_document" "vpc_flow_logs" {
+  statement {
+    sid       = "CreateLogGroup"
+    effect    = "Allow"
+    actions   = ["logs:CreateLogGroup"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "WriteFlowLogs"
+    effect    = "Allow"
+    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+    resources = ["${aws_cloudwatch_log_group.vpc_flow_logs.arn}:*"]
+  }
+
+  statement {
+    sid       = "DescribeFlowLogs"
+    effect    = "Allow"
+    actions   = ["logs:DescribeLogGroups", "logs:DescribeLogStreams"]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role" "vpc_flow_logs" {
+  name               = "forge-vpc-flow-logs"
+  assume_role_policy = data.aws_iam_policy_document.vpc_flow_logs_assume_role.json
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy" "vpc_flow_logs" {
+  name   = "forge-vpc-flow-logs"
+  role   = aws_iam_role.vpc_flow_logs.id
+  policy = data.aws_iam_policy_document.vpc_flow_logs.json
+}
+
+resource "aws_flow_log" "forge_vpc" {
+  log_destination_type = "cloud-watch-logs"
+  log_destination      = aws_cloudwatch_log_group.vpc_flow_logs.arn
+  iam_role_arn         = aws_iam_role.vpc_flow_logs.arn
+  traffic_type         = "ALL"
+  vpc_id               = aws_vpc.forge.id
+
+  tags = merge(local.common_tags, {
+    Name = "forge-vpc-flow-logs"
   })
 }
 

@@ -57,8 +57,11 @@ struct task {
     long deployment_id;
     char type[32];
     char action[32];
+    char request_id[128];
     char app_name[128];
     char repo_url[512];
+    char repo_full_name[256];
+    bool repo_credential_required;
     char commit_sha[128];
     char workdir[512];
     char run_command[1024];
@@ -75,6 +78,12 @@ struct task {
     int env_count;
 };
 
+struct repo_credential {
+    bool has_credential;
+    char username[128];
+    char password[1024];
+};
+
 struct metrics_state {
     pthread_mutex_t mu;
     double cpu_used;
@@ -87,6 +96,7 @@ struct metrics_state {
 struct log_thread_arg {
     struct agent_config cfg;
     long task_id;
+    char request_id[128];
     int fd;
 };
 
@@ -106,6 +116,13 @@ static bool is_commit_sha(const char *value);
 
 static volatile sig_atomic_t running = 1;
 static struct metrics_state metrics = {.mu = PTHREAD_MUTEX_INITIALIZER};
+
+static void secure_zero(void *ptr, size_t len) {
+    volatile unsigned char *p = (volatile unsigned char *)ptr;
+    while (len--) {
+        *p++ = 0;
+    }
+}
 
 static void on_signal(int signo) {
     (void)signo;
@@ -329,7 +346,7 @@ static bool safe_github_repo_url(const char *value) {
     const char *prefix = "https://github.com/";
     size_t prefix_len = strlen(prefix);
     size_t len = strlen(value);
-    if (strncmp(value, prefix, prefix_len) != 0 || len <= prefix_len + 4 || strcmp(value + len - 4, ".git") != 0) {
+    if (memchr(value, '@', len) || strncmp(value, prefix, prefix_len) != 0 || len <= prefix_len + 4 || strcmp(value + len - 4, ".git") != 0) {
         return false;
     }
     const char *repo = value + prefix_len;
@@ -339,6 +356,15 @@ static bool safe_github_repo_url(const char *value) {
         return false;
     }
     return safe_repo_part(repo, (size_t)(slash - repo)) && safe_repo_part(slash + 1, repo_len - (size_t)(slash - repo) - 1);
+}
+
+static bool safe_repo_full_name(const char *value) {
+    size_t len = strlen(value);
+    const char *slash = strchr(value, '/');
+    if (!slash || strchr(slash + 1, '/')) {
+        return false;
+    }
+    return safe_repo_part(value, (size_t)(slash - value)) && safe_repo_part(slash + 1, len - (size_t)(slash - value) - 1);
 }
 
 static bool safe_repo_url(const char *value) {
@@ -361,6 +387,7 @@ static const char *validated_runner_path(const char *path) {
 static bool task_security_valid(const struct agent_config *cfg, const struct task *task) {
     return path_under_base(task->workdir, cfg->app_root) &&
            safe_repo_url(task->repo_url) &&
+           (!task->repo_full_name[0] || safe_repo_full_name(task->repo_full_name)) &&
            (!task->commit_sha[0] || is_commit_sha(task->commit_sha));
 }
 
@@ -503,6 +530,9 @@ static int http_request(const struct agent_config *cfg, const char *method, cons
 }
 
 static void http_response_free(struct http_response *response) {
+    if (response->body) {
+        secure_zero(response->body, strlen(response->body));
+    }
     free(response->body);
     response->body = NULL;
 }
@@ -614,6 +644,7 @@ static bool parse_task(const char *json, struct task *task) {
     }
     memset(task, 0, sizeof(*task));
     task->id = task_json_long_default(root, "id", 0);
+    task_json_optional_string(root, "request_id", task->request_id, sizeof(task->request_id));
     task->deployment_id = task_json_long_default(root, "deployment_id", 0);
     task->port = (int)task_json_long_default(root, "port", 0);
     const json_value_t *resources = json_object_get(root, "resources");
@@ -625,6 +656,8 @@ static bool parse_task(const char *json, struct task *task) {
     task_json_optional_string(root, "action", task->action, sizeof(task->action));
     ok &= task_json_string(root, "app_name", task->app_name, sizeof(task->app_name));
     ok &= task_json_string(root, "repo_url", task->repo_url, sizeof(task->repo_url));
+    task_json_optional_string(root, "repo_full_name", task->repo_full_name, sizeof(task->repo_full_name));
+    task->repo_credential_required = task_json_long_default(root, "repo_credential_required", 0) != 0;
     ok &= task_json_string(root, "commit_sha", task->commit_sha, sizeof(task->commit_sha));
     ok &= task_json_string(root, "workdir", task->workdir, sizeof(task->workdir));
     ok &= task_json_string(root, "run_command", task->run_command, sizeof(task->run_command));
@@ -646,6 +679,9 @@ static bool parse_task(const char *json, struct task *task) {
     }
     task->build_command_count = task_json_string_array(root, "build_commands", task->build_commands, MAX_COMMANDS);
     task->env_count = task_json_env_object(root, "env", task->env, MAX_ENV);
+    if (!task->request_id[0] && task->id > 0) {
+        snprintf(task->request_id, sizeof(task->request_id), "task-%ld", task->id);
+    }
     json_value_free(root);
     free(error);
     return ok && task->id > 0 && task->deployment_id > 0 && task->type[0] && task->workdir[0];
@@ -702,12 +738,16 @@ static long memory_capacity(void) {
     return total > 0 ? total : 0;
 }
 
-static int post_event(const struct agent_config *cfg, long task_id, const char *level, const char *message) {
+static int post_event(const struct agent_config *cfg, long task_id, const char *request_id, const char *level, const char *message) {
     char *escaped_level = json_escape(level);
     char *escaped_message = json_escape(message);
-    char *body = format_json("{\"level\":\"%s\",\"message\":\"%s\"}", escaped_level ? escaped_level : "info", escaped_message ? escaped_message : "");
+    char *escaped_request_id = json_escape(request_id);
+    char *body = request_id && request_id[0]
+        ? format_json("{\"level\":\"%s\",\"message\":\"%s\",\"request_id\":\"%s\"}", escaped_level ? escaped_level : "info", escaped_message ? escaped_message : "", escaped_request_id ? escaped_request_id : "")
+        : format_json("{\"level\":\"%s\",\"message\":\"%s\"}", escaped_level ? escaped_level : "info", escaped_message ? escaped_message : "");
     free(escaped_level);
     free(escaped_message);
+    free(escaped_request_id);
     if (!body) {
         return -1;
     }
@@ -722,16 +762,25 @@ static int post_event(const struct agent_config *cfg, long task_id, const char *
     return rc;
 }
 
-static int complete_task(const struct agent_config *cfg, long task_id, const char *status, const char *message, pid_t pid, int port) {
+static int complete_task(const struct agent_config *cfg, long task_id, const char *request_id, const char *status, const char *message, pid_t pid, int port) {
     char *escaped_status = json_escape(status);
     char *escaped_message = json_escape(message);
-    char *body = format_json("{\"status\":\"%s\",\"message\":\"%s\",\"pid\":%ld,\"port\":%d}",
-                             escaped_status ? escaped_status : status,
-                             escaped_message ? escaped_message : "",
-                             (long)pid,
-                             port);
+    char *escaped_request_id = json_escape(request_id);
+    char *body = request_id && request_id[0]
+        ? format_json("{\"status\":\"%s\",\"message\":\"%s\",\"request_id\":\"%s\",\"pid\":%ld,\"port\":%d}",
+                      escaped_status ? escaped_status : status,
+                      escaped_message ? escaped_message : "",
+                      escaped_request_id ? escaped_request_id : "",
+                      (long)pid,
+                      port)
+        : format_json("{\"status\":\"%s\",\"message\":\"%s\",\"pid\":%ld,\"port\":%d}",
+                      escaped_status ? escaped_status : status,
+                      escaped_message ? escaped_message : "",
+                      (long)pid,
+                      port);
     free(escaped_status);
     free(escaped_message);
+    free(escaped_request_id);
     if (!body) {
         return -1;
     }
@@ -747,7 +796,7 @@ static int complete_task(const struct agent_config *cfg, long task_id, const cha
 }
 
 // Runs a controlled child command, captures its output, and streams that output back to the control plane as task events.
-static int run_capture(const struct agent_config *cfg, long task_id, enum capture_program program, char *const argv[], const char *cwd, int timeout_seconds) {
+static int run_capture_with_env(const struct agent_config *cfg, long task_id, const char *request_id, enum capture_program program, char *const argv[], const char *cwd, int timeout_seconds, const char *const extra_env[]) {
     int pipefd[2];
     if (pipe(pipefd) < 0) {
         return 127;
@@ -767,6 +816,23 @@ static int run_capture(const struct agent_config *cfg, long task_id, enum captur
             if (chdir(cwd) < 0) {
                 fprintf(stderr, "chdir(%s): %s\n", cwd, strerror(errno));
                 _exit(127);
+            }
+        }
+        if (extra_env) {
+            for (size_t i = 0; extra_env[i]; i++) {
+                const char *entry = extra_env[i];
+                const char *eq = strchr(entry, '=');
+                if (!eq || eq == entry) {
+                    continue;
+                }
+                char key[128];
+                size_t key_len = (size_t)(eq - entry);
+                if (key_len >= sizeof(key)) {
+                    continue;
+                }
+                memcpy(key, entry, key_len);
+                key[key_len] = '\0';
+                setenv(key, eq + 1, 1);
             }
         }
         if (program == CAPTURE_GIT) {
@@ -841,7 +907,7 @@ static int run_capture(const struct agent_config *cfg, long task_id, enum captur
         }
         buffer[n] = '\0';
         fputs(buffer, stdout);
-        post_event(cfg, task_id, "info", buffer);
+        post_event(cfg, task_id, request_id, "info", buffer);
     }
     close(pipefd[0]);
     int status = 0;
@@ -877,6 +943,10 @@ static int run_capture(const struct agent_config *cfg, long task_id, enum captur
     return 127;
 }
 
+static int run_capture(const struct agent_config *cfg, long task_id, const char *request_id, enum capture_program program, char *const argv[], const char *cwd, int timeout_seconds) {
+    return run_capture_with_env(cfg, task_id, request_id, program, argv, cwd, timeout_seconds, NULL);
+}
+
 static bool file_exists(const char *path) {
     struct stat st;
     return stat(path, &st) == 0;
@@ -899,38 +969,187 @@ static bool is_commit_sha(const char *value) {
     return true;
 }
 
+static void repo_credential_clear(struct repo_credential *credential) {
+    if (credential) {
+        secure_zero(credential, sizeof(*credential));
+    }
+}
+
+static bool parse_repo_credential(const char *json, struct repo_credential *credential) {
+    char *error = NULL;
+    json_value_t *root = json_parse(json, &error);
+    if (!root) {
+        free(error);
+        return false;
+    }
+    memset(credential, 0, sizeof(*credential));
+    bool ok = json_value_as_string(json_object_get(root, "username"), credential->username, sizeof(credential->username)) &&
+              json_value_as_string(json_object_get(root, "password"), credential->password, sizeof(credential->password));
+    credential->has_credential = ok;
+    json_value_free(root);
+    free(error);
+    return ok;
+}
+
+static int fetch_repo_credential(const struct agent_config *cfg, const struct task *task, struct repo_credential *credential) {
+    memset(credential, 0, sizeof(*credential));
+    if (!safe_github_repo_url(task->repo_url)) {
+        return 0;
+    }
+    char path[512];
+    int n = snprintf(path, sizeof(path), "/api/v1/agents/%s/tasks/%ld/repo-credential", cfg->agent_id, task->id);
+    if (n < 0 || n >= (int)sizeof(path)) {
+        return -1;
+    }
+    struct http_response resp;
+    int rc = http_request(cfg, "POST", path, NULL, &resp);
+    if (rc != 0) {
+        return -1;
+    }
+    if (resp.status == 404) {
+        http_response_free(&resp);
+        return 0;
+    }
+    if (resp.status < 200 || resp.status >= 300 || !resp.body || !parse_repo_credential(resp.body, credential)) {
+        http_response_free(&resp);
+        return -1;
+    }
+    http_response_free(&resp);
+    return 0;
+}
+
+static int write_all_fd(int fd, const char *value) {
+    size_t len = strlen(value);
+    size_t written = 0;
+    while (written < len) {
+        ssize_t n = write(fd, value + written, len - written);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        written += (size_t)n;
+    }
+    return 0;
+}
+
+static int write_askpass_helper(char *path, size_t path_len) {
+    char tmpl[] = "/tmp/forge-agent-askpass-XXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd < 0) {
+        return -1;
+    }
+    const char *script =
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  *Username*) printf '%s' \"${GIT_USERNAME:-x-token-auth}\" ;;\n"
+        "  *) printf '%s' \"$GIT_PASSWORD\" ;;\n"
+        "esac\n";
+    int rc = write_all_fd(fd, script);
+    int saved_errno = errno;
+    if (fchmod(fd, 0700) < 0 && rc == 0) {
+        rc = -1;
+        saved_errno = errno;
+    }
+    close(fd);
+    if (rc != 0) {
+        unlink(tmpl);
+        errno = saved_errno;
+        return -1;
+    }
+    if (snprintf(path, path_len, "%s", tmpl) >= (int)path_len) {
+        unlink(tmpl);
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
+static int run_git_capture(const struct agent_config *cfg, const struct task *task, char *const argv[], const char *cwd, const struct repo_credential *credential) {
+    if (!credential || !credential->has_credential) {
+        return run_capture(cfg, task->id, task->request_id, CAPTURE_GIT, argv, cwd, 0);
+    }
+    char askpass_path[128];
+    if (write_askpass_helper(askpass_path, sizeof(askpass_path)) != 0) {
+        post_event(cfg, task->id, task->request_id, "error", "credential helper setup failed");
+        return 1;
+    }
+    char askpass_env[192];
+    char username_env[192];
+    char password_env[1200];
+    snprintf(askpass_env, sizeof(askpass_env), "GIT_ASKPASS=%s", askpass_path);
+    snprintf(username_env, sizeof(username_env), "GIT_USERNAME=%s", credential->username);
+    snprintf(password_env, sizeof(password_env), "GIT_PASSWORD=%s", credential->password);
+    const char *extra_env[] = {
+        askpass_env,
+        "GIT_TERMINAL_PROMPT=0",
+        username_env,
+        password_env,
+        NULL,
+    };
+    int code = run_capture_with_env(cfg, task->id, task->request_id, CAPTURE_GIT, argv, cwd, 0, extra_env);
+    secure_zero(password_env, sizeof(password_env));
+    unlink(askpass_path);
+    return code;
+}
+
 static int ensure_repo(const struct agent_config *cfg, const struct task *task, char *src, size_t src_len) {
     if (mkdir_p(task->workdir) < 0) {
-        post_event(cfg, task->id, "error", strerror(errno));
+        post_event(cfg, task->id, task->request_id, "error", strerror(errno));
         return 1;
+    }
+    struct repo_credential credential;
+    memset(&credential, 0, sizeof(credential));
+    if (task->repo_credential_required) {
+        if (fetch_repo_credential(cfg, task, &credential) != 0 || !credential.has_credential) {
+            post_event(cfg, task->id, task->request_id, "error", "repository credential unavailable");
+            repo_credential_clear(&credential);
+            return 1;
+        }
     }
     join_path(src, src_len, task->workdir, "src");
     if (!file_exists(src)) {
         char *clone_argv[] = {"git", "clone", "--depth=1", (char *)task->repo_url, src, NULL};
-        int code = run_capture(cfg, task->id, CAPTURE_GIT, clone_argv, NULL, 0);
+        int code = run_git_capture(cfg, task, clone_argv, NULL, &credential);
+        if (code != 0 && !credential.has_credential && safe_github_repo_url(task->repo_url)) {
+            if (fetch_repo_credential(cfg, task, &credential) == 0 && credential.has_credential) {
+                code = run_git_capture(cfg, task, clone_argv, NULL, &credential);
+            }
+        }
         if (code != 0) {
+            repo_credential_clear(&credential);
             return code;
         }
     }
     if (task->commit_sha[0]) {
         if (!is_commit_sha(task->commit_sha)) {
-            post_event(cfg, task->id, "error", "invalid commit sha");
+            post_event(cfg, task->id, task->request_id, "error", "invalid commit sha");
+            repo_credential_clear(&credential);
             return 1;
         }
         char *checkout_argv[] = {"git", "-C", src, "checkout", "--detach", (char *)task->commit_sha, NULL};
-        int code = run_capture(cfg, task->id, CAPTURE_GIT, checkout_argv, NULL, 0);
+        int code = run_capture(cfg, task->id, task->request_id, CAPTURE_GIT, checkout_argv, NULL, 0);
         if (code != 0) {
             char *fetch_argv[] = {"git", "-C", src, "fetch", "--depth=1", "origin", (char *)task->commit_sha, NULL};
-            int fetch_code = run_capture(cfg, task->id, CAPTURE_GIT, fetch_argv, NULL, 0);
+            int fetch_code = run_git_capture(cfg, task, fetch_argv, NULL, &credential);
+            if (fetch_code != 0 && !credential.has_credential && safe_github_repo_url(task->repo_url)) {
+                if (fetch_repo_credential(cfg, task, &credential) == 0 && credential.has_credential) {
+                    fetch_code = run_git_capture(cfg, task, fetch_argv, NULL, &credential);
+                }
+            }
             if (fetch_code != 0) {
+                repo_credential_clear(&credential);
                 return fetch_code;
             }
-            code = run_capture(cfg, task->id, CAPTURE_GIT, checkout_argv, NULL, 0);
+            code = run_capture(cfg, task->id, task->request_id, CAPTURE_GIT, checkout_argv, NULL, 0);
             if (code != 0) {
+                repo_credential_clear(&credential);
                 return code;
             }
         }
     }
+    repo_credential_clear(&credential);
     return 0;
 }
 
@@ -938,7 +1157,7 @@ static int run_build_task(const struct agent_config *cfg, const struct task *tas
     char src[768];
     int code = ensure_repo(cfg, task, src, sizeof(src));
     if (code != 0) {
-        complete_task(cfg, task->id, "failed", "repository checkout failed", 0, 0);
+        complete_task(cfg, task->id, task->request_id, "failed", "repository checkout failed", 0, 0);
         return code;
     }
 
@@ -954,7 +1173,7 @@ static int run_build_task(const struct agent_config *cfg, const struct task *tas
     for (int i = 0; i < task->build_command_count; i++) {
         char cgroup[128];
         snprintf(cgroup, sizeof(cgroup), "build-%ld-%d", task->id, i);
-        post_event(cfg, task->id, "info", task->build_commands[i]);
+        post_event(cfg, task->id, task->request_id, "info", task->build_commands[i]);
         char *argv[18];
         int arg = 0;
         argv[arg++] = (char *)cfg->runner_path;
@@ -974,17 +1193,17 @@ static int run_build_task(const struct agent_config *cfg, const struct task *tas
         argv[arg++] = "-lc";
         argv[arg++] = task->build_commands[i];
         argv[arg] = NULL;
-        code = run_capture(cfg, task->id, CAPTURE_RUNNER, argv, NULL, cfg->build_timeout_seconds);
+        code = run_capture(cfg, task->id, task->request_id, CAPTURE_RUNNER, argv, NULL, cfg->build_timeout_seconds);
         if (code != 0) {
             if (code == 124) {
-                complete_task(cfg, task->id, "failed", "build command timed out", 0, 0);
+                complete_task(cfg, task->id, task->request_id, "failed", "build command timed out", 0, 0);
             } else {
-                complete_task(cfg, task->id, "failed", "build command failed", 0, 0);
+                complete_task(cfg, task->id, task->request_id, "failed", "build command failed", 0, 0);
             }
             return code;
         }
     }
-    complete_task(cfg, task->id, "succeeded", "build completed", 0, 0);
+    complete_task(cfg, task->id, task->request_id, "succeeded", "build completed", 0, 0);
     return 0;
 }
 
@@ -1048,7 +1267,7 @@ static void *log_stream_thread(void *arg) {
             break;
         }
         buffer[n] = '\0';
-        post_event(&thread_arg->cfg, thread_arg->task_id, "info", buffer);
+        post_event(&thread_arg->cfg, thread_arg->task_id, thread_arg->request_id, "info", buffer);
     }
     close(thread_arg->fd);
     free(thread_arg);
@@ -1153,20 +1372,20 @@ static int run_app_task(const struct agent_config *cfg, const struct task *task)
     char src[768];
     int code = ensure_repo(cfg, task, src, sizeof(src));
     if (code != 0) {
-        complete_task(cfg, task->id, "failed", "repository checkout failed", 0, task->port);
+        complete_task(cfg, task->id, task->request_id, "failed", "repository checkout failed", 0, task->port);
         return code;
     }
 
     int pipefd[2];
     if (pipe(pipefd) < 0) {
-        complete_task(cfg, task->id, "failed", "log pipe failed", 0, task->port);
+        complete_task(cfg, task->id, task->request_id, "failed", "log pipe failed", 0, task->port);
         return 127;
     }
     pid_t pid = fork();
     if (pid < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
-        complete_task(cfg, task->id, "failed", "fork failed", 0, task->port);
+        complete_task(cfg, task->id, task->request_id, "failed", "fork failed", 0, task->port);
         return 127;
     }
     if (pid == 0) {
@@ -1198,6 +1417,7 @@ static int run_app_task(const struct agent_config *cfg, const struct task *task)
     if (thread_arg) {
         thread_arg->cfg = *cfg;
         thread_arg->task_id = task->id;
+        snprintf(thread_arg->request_id, sizeof(thread_arg->request_id), "%s", task->request_id);
         thread_arg->fd = pipefd[0];
         pthread_t thread;
         if (pthread_create(&thread, NULL, log_stream_thread, thread_arg) == 0) {
@@ -1219,13 +1439,13 @@ static int run_app_task(const struct agent_config *cfg, const struct task *task)
     for (int i = 0; i < retries; i++) {
         sleep((unsigned int)interval);
         if (health_check_once(task->port, task->health_path)) {
-            complete_task(cfg, task->id, "succeeded", "health checks passed", pid, task->port);
+            complete_task(cfg, task->id, task->request_id, "succeeded", "health checks passed", pid, task->port);
             monitor_process_exit(pid);
             return 0;
         }
     }
     terminate_process_group(pid);
-    complete_task(cfg, task->id, "failed", "health checks failed", pid, task->port);
+    complete_task(cfg, task->id, task->request_id, "failed", "health checks failed", pid, task->port);
     return 1;
 }
 
@@ -1296,7 +1516,7 @@ static void handle_task(const struct agent_config *cfg, const char *json) {
         return;
     }
     if (!task_security_valid(cfg, &task)) {
-        complete_task(cfg, task.id, "failed", "task failed security validation", 0, 0);
+        complete_task(cfg, task.id, task.request_id, "failed", "task failed security validation", 0, 0);
         task_free(&task);
         return;
     }
@@ -1307,7 +1527,7 @@ static void handle_task(const struct agent_config *cfg, const char *json) {
     } else if (strcmp(task.type, "run") == 0) {
         run_app_task(cfg, &task);
     } else {
-        complete_task(cfg, task.id, "failed", "unknown task type", 0, 0);
+        complete_task(cfg, task.id, task.request_id, "failed", "unknown task type", 0, 0);
     }
     task_free(&task);
 }
@@ -1354,10 +1574,10 @@ static int run_stop_task(const struct agent_config *cfg, const struct task *task
     char cgroup_path[512];
     snprintf(cgroup_path, sizeof(cgroup_path), "/sys/fs/cgroup/forge/run-%ld", task->deployment_id);
     if (kill_cgroup_processes(cgroup_path) != 0) {
-        complete_task(cfg, task->id, "failed", "stop failed", 0, 0);
+        complete_task(cfg, task->id, task->request_id, "failed", "stop failed", 0, 0);
         return 1;
     }
-    complete_task(cfg, task->id, "succeeded", "deployment stopped", 0, 0);
+    complete_task(cfg, task->id, task->request_id, "succeeded", "deployment stopped", 0, 0);
     return 0;
 }
 

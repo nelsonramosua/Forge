@@ -20,42 +20,50 @@ type Config struct {
 	AdminToken    string
 	MasterKey     []byte
 	AllowedRepos  []string
+	AdminAppName  string
+	AdminAppRepo  string
 
 	CaddyAdminURL string
 
-	OnlineWindow     time.Duration
-	SchedulerTick    time.Duration
-	TaskPollTimeout  time.Duration
-	DefaultAgentRoot string
-	AppPortStart     int
-	AppPortEnd       int
-	AllowedBranches  []string
-	AllowLocalRepos  bool
-	MaxScheduleBatch int
-	MaxTasksPerAgent int
+	OnlineWindow           time.Duration
+	SchedulerTick          time.Duration
+	TaskPollTimeout        time.Duration
+	DeploymentLeaseTimeout time.Duration
+	TaskLeaseTimeout       time.Duration
+	DefaultAgentRoot       string
+	AppPortStart           int
+	AppPortEnd             int
+	AllowedBranches        []string
+	AllowLocalRepos        bool
+	MaxScheduleBatch       int
+	MaxTasksPerAgent       int
 }
 
 func FromEnv() (Config, error) {
 	cfg := Config{
-		Addr:             env("FORGE_ADDR", ":8080"),
-		DBPath:           env("FORGE_DB_PATH", "data/forge.db"),
-		WorkDir:          env("FORGE_WORK_DIR", "data/work"),
-		BaseDomain:       env("FORGE_BASE_DOMAIN", "forge.localhost"),
-		WebhookSecret:    os.Getenv("FORGE_GITHUB_WEBHOOK_SECRET"),
-		AgentToken:       os.Getenv("FORGE_AGENT_TOKEN"),
-		AdminToken:       os.Getenv("FORGE_ADMIN_TOKEN"),
-		CaddyAdminURL:    strings.TrimRight(os.Getenv("FORGE_CADDY_ADMIN_URL"), "/"),
-		OnlineWindow:     envDuration("FORGE_ONLINE_WINDOW", 15*time.Second),
-		SchedulerTick:    envDuration("FORGE_SCHEDULER_TICK", 2*time.Second),
-		TaskPollTimeout:  envDuration("FORGE_TASK_POLL_TIMEOUT", 25*time.Second),
-		DefaultAgentRoot: env("FORGE_AGENT_APP_ROOT", "/var/lib/forge-agent/apps"),
-		AppPortStart:     envInt("FORGE_APP_PORT_START", 20000),
-		AppPortEnd:       envInt("FORGE_APP_PORT_END", 39999),
-		AllowedRepos:     envList("FORGE_ALLOWED_REPOS"),
-		AllowedBranches:  envList("FORGE_ALLOWED_BRANCHES"),
-		AllowLocalRepos:  envBool("FORGE_ALLOW_LOCAL_REPOS", false),
-		MaxScheduleBatch: envInt("FORGE_MAX_SCHEDULE_BATCH", 20),
-		MaxTasksPerAgent: envInt("FORGE_MAX_TASKS_PER_AGENT", 1),
+		Addr:                   env("FORGE_ADDR", ":8080"),
+		DBPath:                 env("FORGE_DB_PATH", "data/forge.db"),
+		WorkDir:                env("FORGE_WORK_DIR", "data/work"),
+		BaseDomain:             env("FORGE_BASE_DOMAIN", "forge.localhost"),
+		WebhookSecret:          os.Getenv("FORGE_GITHUB_WEBHOOK_SECRET"),
+		AgentToken:             os.Getenv("FORGE_AGENT_TOKEN"),
+		AdminToken:             os.Getenv("FORGE_ADMIN_TOKEN"),
+		AdminAppName:           env("FORGE_ADMIN_APP_NAME", "admin"),
+		AdminAppRepo:           strings.TrimSpace(os.Getenv("FORGE_ADMIN_APP_REPO")),
+		CaddyAdminURL:          strings.TrimRight(os.Getenv("FORGE_CADDY_ADMIN_URL"), "/"),
+		OnlineWindow:           envDuration("FORGE_ONLINE_WINDOW", 15*time.Second),
+		SchedulerTick:          envDuration("FORGE_SCHEDULER_TICK", 2*time.Second),
+		TaskPollTimeout:        envDuration("FORGE_TASK_POLL_TIMEOUT", 25*time.Second),
+		DeploymentLeaseTimeout: envDuration("FORGE_DEPLOYMENT_LEASE_TIMEOUT", 15*time.Minute),
+		TaskLeaseTimeout:       envDuration("FORGE_TASK_LEASE_TIMEOUT", 15*time.Minute),
+		DefaultAgentRoot:       env("FORGE_AGENT_APP_ROOT", "/var/lib/forge-agent/apps"),
+		AppPortStart:           envInt("FORGE_APP_PORT_START", 20000),
+		AppPortEnd:             envInt("FORGE_APP_PORT_END", 39999),
+		AllowedRepos:           envList("FORGE_ALLOWED_REPOS"),
+		AllowedBranches:        envList("FORGE_ALLOWED_BRANCHES"),
+		AllowLocalRepos:        envBool("FORGE_ALLOW_LOCAL_REPOS", false),
+		MaxScheduleBatch:       envInt("FORGE_MAX_SCHEDULE_BATCH", 20),
+		MaxTasksPerAgent:       envInt("FORGE_MAX_TASKS_PER_AGENT", 1),
 	}
 	if cfg.AppPortStart <= 0 || cfg.AppPortEnd <= 0 || cfg.AppPortStart > cfg.AppPortEnd {
 		cfg.AppPortStart = 20000
@@ -69,6 +77,12 @@ func FromEnv() (Config, error) {
 	}
 	if cfg.MaxTasksPerAgent <= 0 {
 		cfg.MaxTasksPerAgent = 1
+	}
+	if cfg.DeploymentLeaseTimeout <= 0 {
+		cfg.DeploymentLeaseTimeout = 15 * time.Minute
+	}
+	if cfg.TaskLeaseTimeout <= 0 {
+		cfg.TaskLeaseTimeout = 15 * time.Minute
 	}
 	masterKey, err := parseMasterKey(os.Getenv("FORGE_MASTER_KEY"))
 	if err != nil {
@@ -102,6 +116,12 @@ func (cfg Config) Validate() error {
 		if !isSafeRepoName(repo) {
 			return fmt.Errorf("FORGE_ALLOWED_REPOS contains invalid repo %q", repo)
 		}
+	}
+	if !isSafeAppName(cfg.AdminAppName) {
+		return fmt.Errorf("FORGE_ADMIN_APP_NAME contains invalid app name %q", cfg.AdminAppName)
+	}
+	if cfg.AdminAppRepo != "" && !isSafeRepoName(cfg.AdminAppRepo) {
+		return fmt.Errorf("FORGE_ADMIN_APP_REPO contains invalid repo %q", cfg.AdminAppRepo)
 	}
 	if len(cfg.AllowedBranches) == 0 {
 		return fmt.Errorf("FORGE_ALLOWED_BRANCHES must contain at least one branch")
@@ -216,6 +236,19 @@ func isSafePathPart(value string) bool {
 	}
 	for _, r := range value {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isSafeAppName(value string) bool {
+	if value == "" || strings.HasPrefix(value, "-") || strings.HasSuffix(value, "-") {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
 			continue
 		}
 		return false

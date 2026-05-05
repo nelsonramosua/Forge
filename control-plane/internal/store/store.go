@@ -3,10 +3,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "embed"
@@ -46,6 +48,23 @@ type Deployment struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
+type DeploymentHealthObservation struct {
+	DeploymentID int64     `json:"deployment_id"`
+	Status       string    `json:"status"`
+	Reason       string    `json:"reason"`
+	CheckedAt    time.Time `json:"checked_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type DeploymentRetryState struct {
+	DeploymentID      int64     `json:"deployment_id"`
+	AttemptCount      int       `json:"attempt_count"`
+	NextRetryAt       time.Time `json:"next_retry_at"`
+	LastFailureReason string    `json:"last_failure_reason"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
 type Task struct {
 	ID           int64     `json:"id"`
 	DeploymentID int64     `json:"deployment_id"`
@@ -63,6 +82,7 @@ type TaskEvent struct {
 	ID           int64     `json:"id"`
 	TaskID       int64     `json:"task_id"`
 	DeploymentID int64     `json:"deployment_id"`
+	RequestID    string    `json:"request_id,omitempty"`
 	Level        string    `json:"level"`
 	Message      string    `json:"message"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -77,9 +97,19 @@ type Secret struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+type RepoCredential struct {
+	RepoFullName string    `json:"repo_full_name"`
+	Nonce        string    `json:"nonce"`
+	Ciphertext   string    `json:"ciphertext"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 type scanner interface {
 	Scan(dest ...interface{}) error
 }
+
+var ErrTaskAlreadyCompleted = errors.New("task already completed")
 
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
@@ -98,6 +128,18 @@ func Open(path string) (*Store, error) {
 
 	s := &Store{db: db}
 	if _, err := s.db.ExecContext(context.Background(), schemaSQL); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err := s.db.ExecContext(context.Background(), repoCredentialsMigrationSQL); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err := s.db.ExecContext(context.Background(), observabilityMigrationSQL); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err := s.db.ExecContext(context.Background(), deploymentRetryMigrationSQL); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -121,18 +163,14 @@ func (s *Store) Close() error {
 
 func (s *Store) UpsertAgent(ctx context.Context, agent Agent) error {
 	now := timestamp(time.Now())
-	if agent.Status == "" {
-		agent.Status = "online"
-	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO agents(id, hostname, address, cpu_capacity, memory_capacity, cpu_used, memory_used, status, last_seen, created_at, updated_at)
-VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES(?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), 'online'), ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   hostname=excluded.hostname,
   address=excluded.address,
   cpu_capacity=excluded.cpu_capacity,
   memory_capacity=excluded.memory_capacity,
-  status=excluded.status,
   last_seen=excluded.last_seen,
   updated_at=excluded.updated_at;
 `, agent.ID, agent.Hostname, agent.Address, agent.CPUCapacity, agent.MemoryCapacity, agent.CPUUsed, agent.MemoryUsed, agent.Status, now, now, now)
@@ -234,16 +272,65 @@ func (s *Store) HasRunningDeploymentHost(ctx context.Context, host string) (bool
 	return true, nil
 }
 
+func (s *Store) HasRunningDeploymentApp(ctx context.Context, appName string) (bool, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM deployments WHERE app_name=? AND status='running' LIMIT 1;`, appName).Scan(&id)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Store) UpdateDeploymentAssignment(ctx context.Context, id int64, agentID string, status string) error {
+	if status == "" {
+		status = "building"
+	}
+	current, err := s.deploymentStatusByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if current != "pending" {
+		return fmt.Errorf("invalid deployment status transition %q -> %q", current, status)
+	}
 	now := timestamp(time.Now())
-	_, err := s.db.ExecContext(ctx, `UPDATE deployments SET assigned_agent_id=?, status=?, updated_at=? WHERE id=?;`, agentID, status, now, id)
-	return err
+	result, err := s.db.ExecContext(ctx, `UPDATE deployments SET assigned_agent_id=?, status=?, updated_at=? WHERE id=? AND status='pending';`, agentID, status, now, id)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated == 0 {
+		return fmt.Errorf("deployment %d changed while updating assignment", id)
+	}
+	return nil
 }
 
 func (s *Store) UpdateDeploymentStatus(ctx context.Context, id int64, status string) error {
+	current, err := s.deploymentStatusByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !deploymentStatusTransitionAllowed(current, status) {
+		return fmt.Errorf("invalid deployment status transition %q -> %q", current, status)
+	}
 	now := timestamp(time.Now())
-	_, err := s.db.ExecContext(ctx, `UPDATE deployments SET status=?, updated_at=? WHERE id=?;`, status, now, id)
-	return err
+	result, err := s.db.ExecContext(ctx, `UPDATE deployments SET status=?, updated_at=? WHERE id=? AND status=?;`, status, now, id, current)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated == 0 {
+		return fmt.Errorf("deployment %d changed while updating status", id)
+	}
+	return nil
 }
 
 func (s *Store) SetDeploymentTargetPort(ctx context.Context, id int64, port int) error {
@@ -253,21 +340,82 @@ func (s *Store) SetDeploymentTargetPort(ctx context.Context, id int64, port int)
 }
 
 func (s *Store) MarkDeploymentRunning(ctx context.Context, id int64, port int) error {
+	current, err := s.deploymentStatusByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if current != "deploying" && current != "running" {
+		return fmt.Errorf("invalid deployment status transition %q -> running", current)
+	}
 	now := timestamp(time.Now())
-	_, err := s.db.ExecContext(ctx, `UPDATE deployments SET status='running', target_port=?, updated_at=? WHERE id=?;`, port, now, id)
-	return err
+	result, err := s.db.ExecContext(ctx, `UPDATE deployments SET status='running', target_port=?, updated_at=? WHERE id=? AND status=?;`, port, now, id, current)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated == 0 {
+		return fmt.Errorf("deployment %d changed while marking running", id)
+	}
+	return nil
+}
+
+func (s *Store) deploymentStatusByID(ctx context.Context, id int64) (string, error) {
+	var status string
+	if err := s.db.QueryRowContext(ctx, `SELECT status FROM deployments WHERE id=? LIMIT 1;`, id).Scan(&status); err != nil {
+		return "", err
+	}
+	return status, nil
+}
+
+func deploymentStatusTransitionAllowed(current, next string) bool {
+	if current == next {
+		return true
+	}
+	switch next {
+	case "building":
+		return current == "pending"
+	case "deploying":
+		return current == "building"
+	case "running":
+		return current == "deploying"
+	case "stopping":
+		return current == "running"
+	case "stopped":
+		return current == "stopping"
+	case "failed":
+		return current == "pending" || current == "building" || current == "deploying" || current == "running" || current == "stopping"
+	case "pending":
+		return current == "failed" || current == "stopped"
+	default:
+		return false
+	}
 }
 
 func (s *Store) LatestRunningDeploymentByHostExcluding(ctx context.Context, host string, excludedID int64) (Deployment, bool, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT * FROM deployments WHERE host=? AND status='running' AND id != ? ORDER BY updated_at DESC LIMIT 1;`, host, excludedID)
-	deployment, err := scanDeployment(row)
-	if err == sql.ErrNoRows {
-		return Deployment{}, false, nil
-	}
+	deployments, err := s.RunningDeploymentsByHostExcluding(ctx, host, excludedID)
 	if err != nil {
 		return Deployment{}, false, err
 	}
-	return deployment, true, nil
+	if len(deployments) == 0 {
+		return Deployment{}, false, nil
+	}
+	return deployments[0], true, nil
+}
+
+func (s *Store) RunningDeploymentsByHostExcluding(ctx context.Context, host string, excludedID int64) ([]Deployment, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT * FROM deployments
+WHERE host=? AND status='running' AND id != ?
+ORDER BY updated_at DESC, id DESC;
+`, host, excludedID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	return scanDeployments(rows)
 }
 
 func (s *Store) UsedTargetPorts(ctx context.Context, agentID string) (map[int]bool, error) {
@@ -369,8 +517,18 @@ func (s *Store) ActiveTaskCountsByAgent(ctx context.Context) (map[string]int, er
 
 func (s *Store) CompleteTask(ctx context.Context, id int64, status string) error {
 	now := timestamp(time.Now())
-	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET status=?, completed_at=?, updated_at=? WHERE id=?;`, status, now, now, id)
-	return err
+	result, err := s.db.ExecContext(ctx, `UPDATE tasks SET status=?, completed_at=?, updated_at=? WHERE id=? AND (completed_at='' OR completed_at IS NULL);`, status, now, now, id)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated == 0 {
+		return ErrTaskAlreadyCompleted
+	}
+	return nil
 }
 
 func (s *Store) GetTask(ctx context.Context, id int64) (Task, bool, error) {
@@ -395,6 +553,11 @@ VALUES(?, ?, ?, ?, ?);
 		return TaskEvent{}, err
 	}
 	event.ID, _ = result.LastInsertId()
+	if event.RequestID != "" {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO task_event_metadata(task_event_id, request_id, created_at, updated_at) VALUES(?, ?, ?, ?) ON CONFLICT(task_event_id) DO UPDATE SET request_id=excluded.request_id, updated_at=excluded.updated_at;`, event.ID, event.RequestID, now, now); err != nil {
+			return TaskEvent{}, err
+		}
+	}
 	event.CreatedAt = parseTime(now)
 	return event, nil
 }
@@ -456,8 +619,239 @@ func (s *Store) DeleteSecret(ctx context.Context, appName string, key string) er
 	return err
 }
 
-func (s *Store) ListTaskEventsByDeployment(ctx context.Context, deploymentID int64) ([]TaskEvent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, deployment_id, level, message, created_at FROM task_events WHERE deployment_id=? ORDER BY created_at ASC, id ASC;`, deploymentID)
+func (s *Store) SetDeploymentHealthObservation(ctx context.Context, deploymentID int64, status string, reason string) error {
+	now := timestamp(time.Now())
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO deployment_health_observations(deployment_id, status, reason, checked_at, updated_at)
+VALUES(?, ?, ?, ?, ?)
+ON CONFLICT(deployment_id) DO UPDATE SET
+  status=excluded.status,
+  reason=excluded.reason,
+  checked_at=excluded.checked_at,
+  updated_at=excluded.updated_at;
+`, deploymentID, status, reason, now, now)
+	return err
+}
+
+func (s *Store) ClearDeploymentHealthObservation(ctx context.Context, deploymentID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM deployment_health_observations WHERE deployment_id=?;`, deploymentID)
+	return err
+}
+
+func (s *Store) DeploymentHealthObservationsByDeploymentIDs(ctx context.Context, deploymentIDs []int64) (map[int64]DeploymentHealthObservation, error) {
+	if len(deploymentIDs) == 0 {
+		return map[int64]DeploymentHealthObservation{}, nil
+	}
+	placeholders := make([]string, len(deploymentIDs))
+	args := make([]interface{}, len(deploymentIDs))
+	for i, deploymentID := range deploymentIDs {
+		placeholders[i] = "?"
+		args[i] = deploymentID
+	}
+	// #nosec G201 -- the placeholders are generated locally and values remain parameterized.
+	query := fmt.Sprintf(`SELECT deployment_id, status, reason, checked_at, updated_at FROM deployment_health_observations WHERE deployment_id IN (%s);`, strings.Join(placeholders, ","))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	observations := make(map[int64]DeploymentHealthObservation, len(deploymentIDs))
+	for rows.Next() {
+		var observation DeploymentHealthObservation
+		var checkedAt, updatedAt string
+		if err := rows.Scan(&observation.DeploymentID, &observation.Status, &observation.Reason, &checkedAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		observation.CheckedAt = parseTime(checkedAt)
+		observation.UpdatedAt = parseTime(updatedAt)
+		observations[observation.DeploymentID] = observation
+	}
+	return observations, rows.Err()
+}
+
+func (s *Store) DeploymentRetryStateByDeploymentID(ctx context.Context, deploymentID int64) (DeploymentRetryState, bool, error) {
+	var state DeploymentRetryState
+	var nextRetryAt, createdAt, updatedAt string
+	err := s.db.QueryRowContext(ctx, `
+SELECT deployment_id, attempt_count, next_retry_at, last_failure_reason, created_at, updated_at
+FROM deployment_retry_state
+WHERE deployment_id=?
+LIMIT 1;
+`, deploymentID).Scan(&state.DeploymentID, &state.AttemptCount, &nextRetryAt, &state.LastFailureReason, &createdAt, &updatedAt)
+	if err == sql.ErrNoRows {
+		return DeploymentRetryState{}, false, nil
+	}
+	if err != nil {
+		return DeploymentRetryState{}, false, err
+	}
+	state.NextRetryAt = parseTime(nextRetryAt)
+	state.CreatedAt = parseTime(createdAt)
+	state.UpdatedAt = parseTime(updatedAt)
+	return state, true, nil
+}
+
+func (s *Store) UpsertDeploymentRetryState(ctx context.Context, deploymentID int64, attemptCount int, nextRetryAt time.Time, reason string) error {
+	now := timestamp(time.Now())
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO deployment_retry_state (deployment_id, attempt_count, next_retry_at, last_failure_reason, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(deployment_id) DO UPDATE SET
+	attempt_count=excluded.attempt_count,
+	next_retry_at=excluded.next_retry_at,
+	last_failure_reason=excluded.last_failure_reason,
+	updated_at=excluded.updated_at;
+`, deploymentID, attemptCount, timestamp(nextRetryAt), reason, now, now)
+	return err
+}
+
+func (s *Store) ClearDeploymentRetryState(ctx context.Context, deploymentID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM deployment_retry_state WHERE deployment_id=?;`, deploymentID)
+	return err
+}
+
+func (s *Store) RetryDeployment(ctx context.Context, id int64) error {
+	if err := s.QueueDeploymentRetry(ctx, id); err != nil {
+		return err
+	}
+	return s.ClearDeploymentRetryState(ctx, id)
+}
+
+func (s *Store) QueueDeploymentRetry(ctx context.Context, id int64) error {
+	current, err := s.deploymentStatusByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if current != "failed" && current != "stopped" {
+		return fmt.Errorf("invalid deployment status transition %q -> pending", current)
+	}
+	now := timestamp(time.Now())
+	result, err := s.db.ExecContext(ctx, `UPDATE deployments SET status='pending', assigned_agent_id='', target_port=0, updated_at=? WHERE id=? AND status IN ('failed', 'stopped');`, now, id)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated == 0 {
+		return fmt.Errorf("deployment %d changed while retrying", id)
+	}
+	if err := s.ClearDeploymentHealthObservation(ctx, id); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) CancelTasksForDeployment(ctx context.Context, deploymentID int64) error {
+	now := timestamp(time.Now())
+	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET status='failed', completed_at=?, updated_at=? WHERE deployment_id=? AND status IN ('pending', 'in_progress');`, now, now, deploymentID)
+	return err
+}
+
+func (s *Store) StaleDeploymentsByStatuses(ctx context.Context, statuses []string, cutoff time.Time) ([]Deployment, error) {
+	if len(statuses) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(statuses))
+	args := make([]interface{}, 0, len(statuses)+1)
+	for i, status := range statuses {
+		placeholders[i] = "?"
+		args = append(args, status)
+	}
+	args = append(args, timestamp(cutoff))
+	// #nosec G201 -- the placeholders are generated locally and values remain parameterized.
+	query := fmt.Sprintf(`SELECT * FROM deployments WHERE status IN (%s) AND updated_at < ? ORDER BY updated_at ASC, id ASC;`, strings.Join(placeholders, ","))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	return scanDeployments(rows)
+}
+
+func (s *Store) StaleInProgressTasks(ctx context.Context, cutoff time.Time) ([]Task, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT * FROM tasks WHERE status='in_progress' AND updated_at < ? ORDER BY updated_at ASC, id ASC;`, timestamp(cutoff))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var tasks []Task
+	for rows.Next() {
+		task, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
+func (s *Store) TouchTask(ctx context.Context, id int64) error {
+	now := timestamp(time.Now())
+	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET updated_at=? WHERE id=? AND status='in_progress';`, now, id)
+	return err
+}
+
+func (s *Store) SetRepoCredential(ctx context.Context, cred RepoCredential) error {
+	now := timestamp(time.Now())
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO repo_credentials(repo_full_name, nonce, ciphertext, created_at, updated_at)
+VALUES(?, ?, ?, ?, ?)
+ON CONFLICT(repo_full_name) DO UPDATE SET
+  nonce=excluded.nonce,
+  ciphertext=excluded.ciphertext,
+  updated_at=excluded.updated_at;
+`, cred.RepoFullName, cred.Nonce, cred.Ciphertext, now, now)
+	return err
+}
+
+func (s *Store) GetRepoCredential(ctx context.Context, repoFullName string) (RepoCredential, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT repo_full_name, nonce, ciphertext, created_at, updated_at
+FROM repo_credentials WHERE repo_full_name=? LIMIT 1;
+`, repoFullName)
+	cred, err := scanRepoCredential(row)
+	if err == sql.ErrNoRows {
+		return RepoCredential{}, false, nil
+	}
+	if err != nil {
+		return RepoCredential{}, false, err
+	}
+	return cred, true, nil
+}
+
+func (s *Store) DeleteRepoCredential(ctx context.Context, repoFullName string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM repo_credentials WHERE repo_full_name=?;`, repoFullName)
+	return err
+}
+
+func (s *Store) HasRepoCredential(ctx context.Context, repoFullName string) (bool, error) {
+	var name string
+	err := s.db.QueryRowContext(ctx, `SELECT repo_full_name FROM repo_credentials WHERE repo_full_name=? LIMIT 1;`, repoFullName).Scan(&name)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (s *Store) ListTaskEventsByDeployment(ctx context.Context, deploymentID int64, limit int, offset int) ([]TaskEvent, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT e.id, e.task_id, e.deployment_id, COALESCE(m.request_id, ''), e.level, e.message, e.created_at
+FROM task_events e
+LEFT JOIN task_event_metadata m ON m.task_event_id = e.id
+WHERE e.deployment_id=?
+ORDER BY e.created_at ASC, e.id ASC
+LIMIT ? OFFSET ?;
+`, deploymentID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -465,10 +859,12 @@ func (s *Store) ListTaskEventsByDeployment(ctx context.Context, deploymentID int
 	var events []TaskEvent
 	for rows.Next() {
 		var event TaskEvent
+		var requestID string
 		var createdAt string
-		if err := rows.Scan(&event.ID, &event.TaskID, &event.DeploymentID, &event.Level, &event.Message, &createdAt); err != nil {
+		if err := rows.Scan(&event.ID, &event.TaskID, &event.DeploymentID, &requestID, &event.Level, &event.Message, &createdAt); err != nil {
 			return nil, err
 		}
+		event.RequestID = requestID
 		event.CreatedAt = parseTime(createdAt)
 		events = append(events, event)
 	}
@@ -479,15 +875,62 @@ func (s *Store) DeploymentCounts(ctx context.Context) (map[string]int64, error) 
 	return s.counts(ctx, "deployments")
 }
 
+func (s *Store) LatestDeploymentPerApp(ctx context.Context) ([]Deployment, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT *
+FROM deployments d
+WHERE id = (
+  SELECT id
+  FROM deployments d2
+  WHERE d2.app_name = d.app_name
+  ORDER BY created_at DESC, id DESC
+  LIMIT 1
+)
+ORDER BY app_name ASC;
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	return scanDeployments(rows)
+}
+
+func (s *Store) LatestRunningDeploymentPerApp(ctx context.Context) ([]Deployment, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT *
+FROM deployments d
+WHERE status='running' AND id = (
+  SELECT id
+  FROM deployments d2
+  WHERE d2.app_name = d.app_name
+    AND d2.status='running'
+  ORDER BY created_at DESC, id DESC
+  LIMIT 1
+)
+ORDER BY app_name ASC;
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	return scanDeployments(rows)
+}
+
 func (s *Store) TaskCounts(ctx context.Context) (map[string]int64, error) {
 	return s.counts(ctx, "tasks")
 }
 
 func (s *Store) counts(ctx context.Context, table string) (map[string]int64, error) {
-	if table != "deployments" && table != "tasks" {
+	var query string
+	switch table {
+	case "deployments":
+		query = `SELECT status, COUNT(*) AS count FROM deployments GROUP BY status;`
+	case "tasks":
+		query = `SELECT status, COUNT(*) AS count FROM tasks GROUP BY status;`
+	default:
 		return nil, fmt.Errorf("invalid table %q", table)
 	}
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`SELECT status, COUNT(*) AS count FROM %s GROUP BY status;`, table))
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -578,6 +1021,18 @@ func scanSecret(row scanner) (Secret, error) {
 	return secret, nil
 }
 
+func scanRepoCredential(row scanner) (RepoCredential, error) {
+	var cred RepoCredential
+	var createdAt, updatedAt string
+	err := row.Scan(&cred.RepoFullName, &cred.Nonce, &cred.Ciphertext, &createdAt, &updatedAt)
+	if err != nil {
+		return RepoCredential{}, err
+	}
+	cred.CreatedAt = parseTime(createdAt)
+	cred.UpdatedAt = parseTime(updatedAt)
+	return cred, nil
+}
+
 func parseTime(value string) time.Time {
 	if value == "" {
 		return time.Time{}
@@ -592,3 +1047,12 @@ func timestamp(t time.Time) string {
 
 //go:embed migrations/001_initial_schema.sql
 var schemaSQL string
+
+//go:embed migrations/002_repo_credentials.sql
+var repoCredentialsMigrationSQL string
+
+//go:embed migrations/003_observability.sql
+var observabilityMigrationSQL string
+
+//go:embed migrations/004_deployment_retry_state.sql
+var deploymentRetryMigrationSQL string

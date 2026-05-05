@@ -56,7 +56,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.25.9"
+          go-version: "1.26.2"
           cache: true
 
       - name: Validate AWS deploy role
@@ -262,6 +262,7 @@ jobs:
           vault_forge_agent_token: "${{ secrets.FORGE_AGENT_TOKEN }}"
           vault_forge_admin_token: "${{ secrets.FORGE_ADMIN_TOKEN }}"
           vault_forge_github_webhook_secret: "${{ secrets.FORGE_GITHUB_WEBHOOK_SECRET }}"
+          vault_cloudflare_api_token: "${{ secrets.CLOUDFLARE_API_TOKEN }}"
           forge_allowed_repos:
             - ${{ secrets.FORGE_ALLOWED_REPOS }}
           vault_grafana_admin_password: "${{ secrets.GRAFANA_ADMIN_PASSWORD }}"

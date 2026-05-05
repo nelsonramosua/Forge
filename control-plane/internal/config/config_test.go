@@ -40,6 +40,7 @@ func TestFromEnvRequiresSecretsAndAllowlist(t *testing.T) {
 
 func TestFromEnvAcceptsValidProductionConfig(t *testing.T) {
 	setValidEnv(t)
+	t.Setenv("FORGE_ADMIN_APP_REPO", "example/admin")
 	cfg, err := FromEnv()
 	if err != nil {
 		t.Fatal(err)
@@ -52,6 +53,9 @@ func TestFromEnvAcceptsValidProductionConfig(t *testing.T) {
 	}
 	if got := strings.Join(cfg.AllowedBranches, ","); got != "main" {
 		t.Fatalf("unexpected allowed branches %q", got)
+	}
+	if cfg.AdminAppName != "admin" || cfg.AdminAppRepo != "example/admin" {
+		t.Fatalf("unexpected admin app config: name=%q repo=%q", cfg.AdminAppName, cfg.AdminAppRepo)
 	}
 }
 
@@ -66,5 +70,11 @@ func TestFromEnvRejectsUnsafeAllowlistValues(t *testing.T) {
 	t.Setenv("FORGE_ALLOWED_BRANCHES", "--upload-pack")
 	if _, err := FromEnv(); err == nil {
 		t.Fatal("expected invalid branch to be rejected")
+	}
+
+	setValidEnv(t)
+	t.Setenv("FORGE_ADMIN_APP_REPO", "../admin")
+	if _, err := FromEnv(); err == nil {
+		t.Fatal("expected invalid admin app repo to be rejected")
 	}
 }

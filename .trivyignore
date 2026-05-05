@@ -1,0 +1,8 @@
+# Public control-plane ingress on 80/443 is intentional in the reference AWS deployment.
+AVD-AWS-0107
+
+# Public outbound egress is required for repo fetches, webhooks, and package downloads.
+AVD-AWS-0104
+
+# The control-plane instance is intentionally public in the reference AWS deployment.
+AVD-AWS-0164

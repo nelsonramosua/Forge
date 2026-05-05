@@ -1,6 +1,9 @@
 {
 	admin 127.0.0.1:2019
 	email admin@{{ forge_base_domain }}
+	{% if forge_caddy_dns_cloudflare_enabled | bool %}
+	acme_dns cloudflare {env.CF_API_TOKEN}
+	{% endif %}
 	on_demand_tls {
 		ask http://127.0.0.1:8080/api/v1/tls/ask
 	}

@@ -1,0 +1,27 @@
+name: admin
+runtime: python3.11
+
+build:
+  commands:
+    - python3 -m venv .venv
+    - .venv/bin/pip install -r requirements.txt --quiet
+
+run:
+  command: .venv/bin/python server.py
+  port: 8000
+
+resources:
+  memory: 128M
+  cpu: 0.25
+
+health:
+  path: /health
+  interval: 10s
+  timeout: 3s
+  retries: 3
+
+env:
+  - FORGE_ADMIN_TOKEN
+  - FORGE_ADMIN_CONSOLE_PASSWORD
+  - FORGE_CONTROL_PLANE_URL
+  - FORGE_ADMIN_SESSION_TTL_SECONDS

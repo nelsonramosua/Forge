@@ -108,6 +108,7 @@ terraform -chdir=infra/terraform/aws apply
 Terraform creates:
 
 - VPC, public subnet, internet gateway, route table.
+- VPC Flow Logs for the Forge VPC, delivered to an encrypted CloudWatch Logs group backed by a customer-managed KMS key for network-visibility and security review.
 - Security group for the control plane.
 - Control-plane API port `8080` is reachable only from inside the Forge VPC.
   Use Caddy over HTTPS for public webhooks and SSH into the control plane for local admin/metrics checks.
@@ -117,6 +118,8 @@ Terraform creates:
 - `forge-control-plane` EC2 instance.
 - `forge-worker-1` EC2 instance.
 - `infra/ansible/inventory.ini`.
+
+The reference AWS stack keeps the control plane publicly reachable on `80/443` and assigns a public IP to the control-plane instance on purpose, so the repository root `.trivyignore` documents those accepted exceptions for the Trivy scan.
 
 ## 6. DNS
 
@@ -174,6 +177,28 @@ For the first end-to-end test, set both records to **DNS only** in Cloudflare, n
 @   A  CONTROL_PLANE_PUBLIC_IP  DNS only
 *   A  CONTROL_PLANE_PUBLIC_IP  DNS only
 ```
+
+To avoid future TLS issuance failures when control-plane IPs change, enable Cloudflare DNS-01 automation in Caddy:
+
+1. Add to `infra/ansible/group_vars/all/main.local.yml`:
+
+```yaml
+forge_caddy_dns_cloudflare_enabled: true
+```
+
+2. Add `vault_cloudflare_api_token` to `infra/ansible/group_vars/all/vault.yml`.
+   The token must include `Zone.Zone:Read` and `Zone.DNS:Edit` for your zone.
+
+3. Re-run the control-plane play:
+
+```sh
+ANSIBLE_PRIVATE_KEY_FILE=~/.ssh/forge_aws \
+ansible-playbook -i infra/ansible/inventory.ini infra/ansible/playbook.yml \
+  --ask-vault-pass \
+  --limit forge-control-plane
+```
+
+When this mode is enabled, Caddy uses DNS-01 through Cloudflare for both base-domain and on-demand subdomain certificates, so ACME validation no longer depends on direct public reachability to the origin host during challenge checks.
 
 Forge already uses Caddy on the control-plane VM to serve public HTTPS on port `443` and to reverse-proxy the control-plane API on `127.0.0.1:8080`.
 Application subdomains use Caddy On-Demand TLS with an internal Forge allow check, so the first HTTPS request to a new app hostname can take a few seconds while Caddy obtains the certificate.
@@ -261,6 +286,8 @@ openssl rand -hex 32      # vault_forge_agent_token
 openssl rand -hex 32      # vault_forge_admin_token
 openssl rand -hex 32      # vault_forge_github_webhook_secret
 openssl rand -base64 24   # vault_grafana_admin_password
+# Cloudflare DNS-01 (optional)
+# create token in Cloudflare dashboard with Zone.Zone:Read + Zone.DNS:Edit
 ```
 
 Configure the repositories Forge may deploy. For local deploy values that should not be committed, create `infra/ansible/group_vars/all/main.local.yml`:
@@ -346,7 +373,19 @@ ssh -i "$SSH_KEY" \
 
 ## 10. GitHub End-To-End Test
 
-The first GitHub E2E should use a public repository. Private repositories need deploy-key or GitHub App support because Forge currently clones the webhook `clone_url` without credentials.
+The first GitHub E2E can use a public repository. Private repositories are supported after you register
+an encrypted repo credential through the admin API:
+
+```sh
+curl -X PUT "https://BASE_DOMAIN/api/v1/repos/OWNER/REPO/credential" \
+  -H "Authorization: Bearer $FORGE_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"token":"github_pat_..."}'
+```
+
+The repository still must be listed in `forge_allowed_repos`.
+
+The bundled admin console lives in `examples/forge-admin`. To deploy it, publish that repository, set `FORGE_ADMIN_APP_REPO` (or `forge_admin_app_repo` in Ansible vars) to that repo, and deploy an app whose `forge.yaml` uses `name: admin`.
 
 Confirm public DNS and TLS first:
 

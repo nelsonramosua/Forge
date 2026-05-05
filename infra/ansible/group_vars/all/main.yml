@@ -11,3 +11,11 @@ ansible_python_interpreter: /usr/bin/python3
 #
 # forge_allowed_branches:
 #   - main
+#
+# Reserve admin.BASE_DOMAIN for the Forge admin console repository.
+#
+# forge_admin_app_repo: YOUR_GITHUB_USER/YOUR_ADMIN_REPO
+
+# Enable Caddy ACME DNS-01 challenge via Cloudflare.
+# Requires vault_cloudflare_api_token in vault.yml with Zone.DNS:Edit and Zone.Zone:Read.
+forge_caddy_dns_cloudflare_enabled: false

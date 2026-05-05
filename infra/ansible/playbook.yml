@@ -4,8 +4,11 @@
   vars:
     forge_user: forge
     forge_source_dir: /opt/forge-src
-    forge_go_version: "1.25.9"
+    forge_go_version: "1.26.2"
     forge_go_root: /usr/local/go
+    forge_xcaddy_version: "v0.4.5"
+    forge_caddy_version: "v2.11.2"
+    forge_caddy_cloudflare_module_version: "v0.2.1"
     forge_base_domain: "{{ hostvars[inventory_hostname].forge_base_domain }}"
     forge_control_plane_private_ip: "{{ hostvars[inventory_hostname].forge_control_plane_private_ip }}"
   tasks:
@@ -104,6 +107,61 @@
           - grafana
         state: present
         update_cache: true
+
+    - name: Validate Cloudflare DNS-01 token when enabled
+      ansible.builtin.assert:
+        that:
+          - vault_cloudflare_api_token is defined
+          - vault_cloudflare_api_token | length > 0
+        fail_msg: "vault_cloudflare_api_token must be set in vault.yml when forge_caddy_dns_cloudflare_enabled=true"
+      when: forge_caddy_dns_cloudflare_enabled | bool
+      no_log: true
+
+    - name: Check Caddy Cloudflare DNS module
+      ansible.builtin.command:
+        cmd: /usr/bin/caddy list-modules
+      register: caddy_module_list
+      changed_when: false
+      failed_when: false
+      when: forge_caddy_dns_cloudflare_enabled | bool
+
+    - name: Install xcaddy builder
+      ansible.builtin.command:
+        cmd: "{{ forge_go_root }}/bin/go install github.com/caddyserver/xcaddy/cmd/xcaddy@{{ forge_xcaddy_version }}"
+      environment:
+        GOTOOLCHAIN: local
+      when:
+        - forge_caddy_dns_cloudflare_enabled | bool
+        - caddy_module_list.rc != 0 or "dns.providers.cloudflare" not in caddy_module_list.stdout
+      changed_when: true
+
+    - name: Build Caddy with Cloudflare DNS module
+      ansible.builtin.command:
+        cmd: "/root/go/bin/xcaddy build {{ forge_caddy_version }} --with github.com/caddy-dns/cloudflare@{{ forge_caddy_cloudflare_module_version }} --output /usr/bin/caddy"
+        chdir: /tmp
+      when:
+        - forge_caddy_dns_cloudflare_enabled | bool
+        - caddy_module_list.rc != 0 or "dns.providers.cloudflare" not in caddy_module_list.stdout
+      changed_when: true
+      notify: Reload caddy
+
+    - name: Create caddy systemd override directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/caddy.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install caddy systemd override
+      ansible.builtin.template:
+        src: caddy.override.conf.j2
+        dest: /etc/systemd/system/caddy.service.d/override.conf
+        owner: root
+        group: root
+        mode: "0600"
+      notify: Reload caddy
+      no_log: true
 
     - name: Install Go toolchain
       ansible.builtin.include_tasks: tasks/install-go.yml
@@ -331,6 +389,7 @@
       ansible.builtin.systemd:
         name: caddy
         state: reloaded
+        daemon_reload: true
 
     - name: Restart forge-control-plane
       ansible.builtin.systemd:
@@ -359,7 +418,7 @@
   vars:
     forge_user: forge
     forge_source_dir: /opt/forge-src
-    forge_go_version: "1.25.9"
+    forge_go_version: "1.26.2"
     forge_go_root: /usr/local/go
     forge_control_plane_url: "{{ hostvars[inventory_hostname].forge_control_plane_url }}"
     forge_agent_address: "{{ hostvars[inventory_hostname].forge_agent_address }}"

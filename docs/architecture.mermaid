@@ -1,14 +1,20 @@
 %%{init: { "theme": "default" }}%%
 
 flowchart LR
+ subgraph UI["Public UI"]
+    direction TB
+        LAND["Forge landing page<br>/ -> /api/v1/status"]
+        ADMINAPP["Forge admin console<br>examples/forge-admin<br>reserved admin subdomain"]
+  end
  subgraph CP["Control Plane - Go"]
     direction TB
-        SRV["HTTP Server<br>/webhook - /events SSE<br>/admin API - /metrics"]
-        AUTH["Auth / Validation<br>admin token - agent token<br>webhook signature"]
-        SCH["Scheduler<br>agent selection<br>capacity checks<br>task creation"]
-        VAULT["Secret Vault<br>AES-256-GCM<br>per-app env injection"]
-        DB[("SQLite WAL<br>agents - deployments<br>tasks - events<br>encrypted secrets")]
+        SRV["HTTP Server<br>/webhook - /events SSE<br>/agents - /apps - /repos<br>/deployments - /metrics"]
+        AUTH["Auth / Validation<br>admin token - agent token<br>webhook signature - allowed repos"]
+        SCH["Scheduler<br>agent selection<br>stale work sweep<br>retry queue - health reconcile"]
+        VAULT["Secret Vault<br>AES-256-GCM<br>repo credentials + app env"]
+        DB[("SQLite WAL<br>agents - deployments<br>tasks - events + request_id<br>health - retry state<br>encrypted secrets - repo creds")]
         CADCLI["Caddy Client<br>Admin API :2019<br>route reconciliation"]
+        RETRY["Retry State<br>backoff + queueing<br>latest failed deployment"]
   end
  subgraph WK["Worker Node - Private Subnet"]
     direction TB
@@ -32,11 +38,14 @@ flowchart LR
         GRAF["Grafana<br>dashboards"]
         AM["Alertmanager<br>alerts - SLOs"]
   end
+    LAND --> SRV
+    ADMINAPP --> SRV
     SRV --> AUTH
     AUTH --> DB
     SRV <--> DB
     SCH <--> DB
     VAULT <--> DB
+    RETRY <--> DB
     CADCLI <--> DB
     AGT -- build task --> RUNNER
     RUNNER --> CG & FS
@@ -47,7 +56,7 @@ flowchart LR
     CDY --> TLS & ROUTE
     PROM --> GRAF & AM
     GH["GitHub<br><b>Push webhook</b><br>HMAC-SHA256 - repo/branch allowlist"] -- POST /api/v1/webhook/github --> SRV
-    SRV -- "private VPC HTTP<br>poll - claim - complete<br>logs - heartbeat" --> AGT
+    SRV -- "private VPC HTTP<br>poll - claim - complete<br>logs - heartbeat - request_id" --> AGT
     AGT -- task events<br>deployment status --> SRV
     CADCLI -- POST /load<br>dynamic route config --> CDY
     APP -- private IP:$PORT --> ROUTE
@@ -56,10 +65,13 @@ flowchart LR
     PROM -. scrape :8080 .-> SRV
     PROM -. scrape :9108 .-> EXP
 
+     LAND:::public
+     ADMINAPP:::public
      SRV:::control
      AUTH:::control
      SCH:::control
      VAULT:::control
+     RETRY:::control
      DB:::data
      CADCLI:::control
      AGT:::worker
@@ -78,6 +90,7 @@ flowchart LR
      GH:::external
      NET:::internet
     classDef external fill:#f3f0ea,stroke:#555,color:#222
+    classDef public fill:#eef7ff,stroke:#3178c6,color:#103a63
     classDef control fill:#ecebff,stroke:#6d5dfc,color:#1f1f4d
     classDef worker fill:#e1f7ef,stroke:#10a37f,color:#063f35
     classDef edge fill:#fff1d6,stroke:#c47a00,color:#5c3400

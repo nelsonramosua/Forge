@@ -1,7 +1,6 @@
 bin/
 /.bin-nobody/
 data/
-.codex
 .vscode/
 __pycache__/
 *.py[cod]
@@ -28,3 +27,4 @@ infra/terraform/**/*.tfvars.json
 !infra/terraform/**/*.tfvars.example
 *.pem
 *.key
+.ansible/

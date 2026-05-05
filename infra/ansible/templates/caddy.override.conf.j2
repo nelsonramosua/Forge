@@ -1,0 +1,4 @@
+[Service]
+{% if forge_caddy_dns_cloudflare_enabled | bool %}
+Environment=CF_API_TOKEN={{ vault_cloudflare_api_token }}
+{% endif %}
