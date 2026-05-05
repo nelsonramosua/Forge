@@ -1,9 +1,14 @@
+import base64
+import binascii
+import hashlib
+import hmac
 import http.server
 import json
 import os
 import secrets
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.cookies import SimpleCookie
 from ipaddress import ip_address
@@ -23,13 +28,37 @@ CONSOLE_PASSWORD = os.environ["FORGE_ADMIN_CONSOLE_PASSWORD"]
 CP_URL = control_plane_url()
 PORT = int(os.environ.get("PORT", 8000))
 SESSION_TTL_SECONDS = int(os.environ.get("FORGE_ADMIN_SESSION_TTL_SECONDS", 3600))
+SESSION_SIGNING_KEY = os.environ.get("FORGE_ADMIN_SESSION_KEY", ADMIN_TOKEN + ":" + CONSOLE_PASSWORD).encode()
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
-SESSIONS: dict[str, float] = {}
 FAILED_LOGINS: dict[str, dict[str, object]] = {}
 LOGIN_FAIL_LIMIT = 5
 LOGIN_FAIL_WINDOW_SECONDS = 60
 LOGIN_BLOCK_SECONDS = 900
 MAX_PROXY_BODY_BYTES = 1 << 20
+TRUSTED_PROXY_IPS = set()
+
+for raw_ip in ("127.0.0.1", "::1", os.environ.get("FORGE_CONTROL_PLANE_PRIVATE_IP", "")):
+    raw_ip = raw_ip.strip()
+    if raw_ip:
+        try:
+            TRUSTED_PROXY_IPS.add(ip_address(raw_ip))
+        except ValueError:
+            pass
+
+for raw_ip in os.environ.get("FORGE_TRUSTED_PROXY_IPS", "").split(","):
+    raw_ip = raw_ip.strip()
+    if raw_ip:
+        try:
+            TRUSTED_PROXY_IPS.add(ip_address(raw_ip))
+        except ValueError:
+            pass
+
+try:
+    cp_host = urllib.parse.urlparse(CP_URL).hostname or ""
+    if cp_host:
+        TRUSTED_PROXY_IPS.add(ip_address(cp_host))
+except ValueError:
+    pass
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -93,8 +122,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json(401, {"error": "invalid credentials"})
             return
         FAILED_LOGINS.pop(client, None)
-        session_id = secrets.token_hex(32)
-        SESSIONS[session_id] = time.time() + SESSION_TTL_SECONDS
+        session_cookie = self._make_session_cookie()
         data = json.dumps({"status": "ok"}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -103,7 +131,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header(
             "Set-Cookie",
             "forge_session={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={}".format(
-                session_id,
+                session_cookie,
                 SESSION_TTL_SECONDS,
             ),
         )
@@ -111,20 +139,44 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
     def _handle_logout(self):
-        cookie = self._get_session_cookie()
-        if cookie:
-            SESSIONS.pop(cookie, None)
-        self._send_json(200, {"status": "ok"})
+        data = json.dumps({"status": "ok"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Set-Cookie", "forge_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _check_session(self) -> bool:
         cookie = self._get_session_cookie()
-        expires_at = SESSIONS.get(cookie or "")
-        if not expires_at:
+        if not cookie:
             return False
-        if expires_at < time.time():
-            SESSIONS.pop(cookie, None)
+        try:
+            payload_token, signature = cookie.rsplit(".", 1)
+        except ValueError:
             return False
-        return True
+        expected = hmac.new(SESSION_SIGNING_KEY, payload_token.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return False
+        try:
+            payload = json.loads(_b64decode(payload_token))
+        except (ValueError, json.JSONDecodeError, binascii.Error):
+            return False
+        try:
+            expires_at = int(payload.get("exp", 0))
+        except (TypeError, ValueError):
+            return False
+        return expires_at >= int(time.time())
+
+    def _make_session_cookie(self) -> str:
+        payload = json.dumps(
+            {"exp": int(time.time()) + SESSION_TTL_SECONDS, "nonce": secrets.token_hex(16)},
+            separators=(",", ":"),
+        ).encode()
+        payload_token = _b64encode(payload)
+        signature = hmac.new(SESSION_SIGNING_KEY, payload_token.encode(), hashlib.sha256).hexdigest()
+        return "{}.{}".format(payload_token, signature)
 
     def _get_session_cookie(self) -> str | None:
         raw = self.headers.get("Cookie", "")
@@ -139,7 +191,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             remote_ip = ip_address(remote)
         except ValueError:
             return remote or "unknown"
-        if remote_ip.is_loopback:
+        if remote_ip in TRUSTED_PROXY_IPS:
             forwarded_for = self.headers.get("X-Forwarded-For", "")
             first = forwarded_for.split(",", 1)[0].strip()
             if first:
@@ -238,6 +290,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         pass
+
+
+def _b64encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+
+def _b64decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
 if __name__ == "__main__":

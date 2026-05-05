@@ -125,6 +125,34 @@ func TestRepoCredentialLifecycle(t *testing.T) {
 	}
 }
 
+func TestAllowedRepoLifecycle(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "forge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertAllowedRepo(ctx, "example/admin-app", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	repos, err := st.ListAllowedRepos(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 1 || repos[0].RepoFullName != "example/admin-app" || repos[0].Source != "admin" {
+		t.Fatalf("unexpected allowed repos: %+v", repos)
+	}
+	if err := st.DeleteAllowedRepo(ctx, "example/admin-app"); err != nil {
+		t.Fatal(err)
+	}
+	repos, err = st.ListAllowedRepos(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 0 {
+		t.Fatalf("expected allowed repo to be deleted, got %+v", repos)
+	}
+}
+
 func TestDeploymentRetryStateLifecycle(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(filepath.Join(t.TempDir(), "forge.db"))

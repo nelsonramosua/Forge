@@ -2,6 +2,7 @@ const loginView = document.getElementById('login-view');
 const dashboardView = document.getElementById('dashboard-view');
 const loginForm = document.getElementById('login-form');
 const loginError = document.getElementById('login-error');
+const repoForm = document.getElementById('repo-form');
 const reposTable = document.getElementById('repos-table');
 const appsTable = document.getElementById('apps-table');
 const deploymentsTable = document.getElementById('deployments-table');
@@ -60,14 +61,22 @@ async function api(path, options = {}) {
   const response = await fetch(path, {...options, cache: 'no-store'});
   if (response.status === 401) {
     showLogin();
-    throw new Error('not authenticated');
+    const error = new Error('not authenticated');
+    error.status = 401;
+    throw error;
   }
   const body = await response.text();
   const data = body ? JSON.parse(body) : {};
   if (!response.ok) {
-    throw new Error(data.error || `request failed: ${response.status}`);
+    const error = new Error(data.error || `request failed: ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
   return data;
+}
+
+function isAuthError(error) {
+  return error && (error.status === 401 || error.message === 'not authenticated');
 }
 
 function showLogin() {
@@ -123,10 +132,12 @@ function renderRepos() {
 
     const row = document.createElement('tr');
     td(row, repo.repo);
+    td(row, repo.source || 'config');
     td(row, repo.has_credential ? 'configured' : 'missing');
     actionCell(row, [
       button('Set token', 'set-credential', {repo: repo.repo}),
       repo.has_credential ? button('Delete', 'delete-credential', {repo: repo.repo}, true) : null,
+      repo.source === 'admin' ? button('Remove repo', 'remove-repo', {repo: repo.repo}, true) : null,
     ]);
     reposTable.appendChild(row);
   });
@@ -413,6 +424,10 @@ async function runAction(action, data) {
     const [owner, name] = data.repo.split('/');
     await api(`/api/v1/repos/${owner}/${name}/credential`, {method: 'DELETE'});
   }
+  if (action === 'remove-repo' && await confirmAction('Remove repository', `Remove ${data.repo} from allowed repos?`)) {
+    const [owner, name] = data.repo.split('/');
+    await api(`/api/v1/repos/${owner}/${name}`, {method: 'DELETE'});
+  }
   if (action === 'delete-secret' && await confirmAction('Delete secret', `Delete ${data.key} from ${data.app}?`)) {
     await api(`/api/v1/apps/${encodeURIComponent(data.app)}/secrets/${encodeURIComponent(data.key)}`, {method: 'DELETE'});
     await loadSecrets(data.app);
@@ -430,7 +445,16 @@ loginForm.addEventListener('submit', async (event) => {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({password}),
     });
-    await refresh();
+    try {
+      await refresh();
+    } catch (error) {
+      if (isAuthError(error)) {
+        showLogin();
+      } else {
+        showDashboard();
+        showError(error);
+      }
+    }
   } catch (error) {
     loginError.textContent = error.message === 'too many failed login attempts' ? error.message : 'Sign in failed';
   }
@@ -451,6 +475,23 @@ deployForm.addEventListener('submit', async (event) => {
       }),
     });
     deployResult.textContent = `Queued deployment ${deployment.id}`;
+    await refresh();
+  } catch (error) {
+    showError(error);
+  }
+});
+
+repoForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  deployResult.textContent = '';
+  const form = new FormData(repoForm);
+  try {
+    await api('/api/v1/repos', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({repo: form.get('repo')}),
+    });
+    repoForm.reset();
     await refresh();
   } catch (error) {
     showError(error);
@@ -497,7 +538,14 @@ document.getElementById('close-deployment').addEventListener('click', () => {
   deploymentPanel.hidden = true;
 });
 
-refresh().catch(showLogin);
+refresh().catch((error) => {
+  if (isAuthError(error)) {
+    showLogin();
+    return;
+  }
+  showDashboard();
+  showError(error);
+});
 setInterval(() => {
   if (!dashboardView.hidden) {
     refresh().catch(() => {});

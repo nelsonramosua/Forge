@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"testing"
 
 	"forge/control-plane/internal/config"
@@ -8,7 +9,7 @@ import (
 
 func TestRepoCloneURLAllowsLocalAbsolutePath(t *testing.T) {
 	s := &Server{cfg: config.Config{AllowLocalRepos: true}}
-	repoURL, err := s.repoCloneURL(githubPushPayload{
+	repoURL, err := s.repoCloneURL(context.Background(), githubPushPayload{
 		Repository: struct {
 			CloneURL string `json:"clone_url"`
 			HTMLURL  string `json:"html_url"`
@@ -31,7 +32,7 @@ func TestRepoCloneURLAllowsLocalAbsolutePath(t *testing.T) {
 
 func TestRepoCloneURLRejectsLocalPathsOutsideTemp(t *testing.T) {
 	s := &Server{cfg: config.Config{AllowLocalRepos: true}}
-	_, err := s.repoCloneURL(githubPushPayload{
+	_, err := s.repoCloneURL(context.Background(), githubPushPayload{
 		Repository: struct {
 			CloneURL string `json:"clone_url"`
 			HTMLURL  string `json:"html_url"`

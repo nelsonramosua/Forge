@@ -176,6 +176,47 @@ func TestRepoListingShowsCredentialStatusWithoutSecret(t *testing.T) {
 	}
 }
 
+func TestAllowedRepoCanBeAddedAndUsedForManualDeploy(t *testing.T) {
+	_, handler, _ := newManualDeployTestServer(t)
+	repo := newLocalForgeRepo(t, "extra", "main")
+	configureGitInsteadOf(t, "https://github.com/example/extra.git", repo)
+
+	res := doJSON(handler, http.MethodPost, "/api/v1/repos", `{"repo":"example/extra"}`, "admin-token")
+	if res.Code != http.StatusCreated {
+		t.Fatalf("add repo: expected %d, got %d body=%s", http.StatusCreated, res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), `"source":"admin"`) || strings.Contains(res.Body.String(), "github_pat_") {
+		t.Fatalf("unexpected add repo response: %s", res.Body.String())
+	}
+
+	res = doJSON(handler, http.MethodPost, "/api/v1/deployments", `{"repo":"example/extra","branch":"main"}`, "admin-token")
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("manual deploy dynamic repo: expected %d, got %d body=%s", http.StatusAccepted, res.Code, res.Body.String())
+	}
+}
+
+func TestAllowedRepoDeleteOnlyRemovesAdminManagedRepos(t *testing.T) {
+	_, handler, _ := newManualDeployTestServer(t)
+
+	res := doJSON(handler, http.MethodPost, "/api/v1/repos", `{"repo":"example/extra"}`, "admin-token")
+	if res.Code != http.StatusCreated {
+		t.Fatalf("add repo: expected %d, got %d body=%s", http.StatusCreated, res.Code, res.Body.String())
+	}
+	res = doJSON(handler, http.MethodDelete, "/api/v1/repos/example/extra", "", "admin-token")
+	if res.Code != http.StatusOK {
+		t.Fatalf("delete dynamic repo: expected %d, got %d body=%s", http.StatusOK, res.Code, res.Body.String())
+	}
+	res = doJSON(handler, http.MethodPost, "/api/v1/deployments", `{"repo":"example/extra","branch":"main"}`, "admin-token")
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("manual deploy after delete: expected %d, got %d body=%s", http.StatusForbidden, res.Code, res.Body.String())
+	}
+
+	res = doJSON(handler, http.MethodDelete, "/api/v1/repos/example/app", "", "admin-token")
+	if res.Code != http.StatusConflict {
+		t.Fatalf("delete config repo: expected %d, got %d body=%s", http.StatusConflict, res.Code, res.Body.String())
+	}
+}
+
 func newLocalForgeRepo(t *testing.T, appName string, branch string) string {
 	t.Helper()
 	dir := t.TempDir()

@@ -8,7 +8,7 @@ This directory contains the bundled Forge admin console example. It is a small P
 - Triggers manual deploys, redeploys branch HEAD, retries failed/stopped deployments, rolls back to previous commits, and stops/cancels deployments.
 - Manages app secret keys and GitHub repo credentials without displaying stored values.
 - Proxies authenticated requests to the control plane using `FORGE_ADMIN_TOKEN`.
-- Uses `FORGE_ADMIN_CONSOLE_PASSWORD` for browser login and stores a session cookie in the browser.
+- Uses `FORGE_ADMIN_CONSOLE_PASSWORD` for browser login and stores a signed session cookie in the browser.
 - Exposes `/health` for Forge health checks.
 
 ## Deploying it
@@ -28,5 +28,11 @@ When `FORGE_CONTROL_PLANE_PRIVATE_IP` is set, the console proxies the control pl
 Optional environment variables:
 
 - `FORGE_ADMIN_SESSION_TTL_SECONDS`
+- `FORGE_ADMIN_SESSION_KEY`
+- `FORGE_TRUSTED_PROXY_IPS`
+
+The session key is optional; when unset, the console derives a signing key from `FORGE_ADMIN_TOKEN` and `FORGE_ADMIN_CONSOLE_PASSWORD`. `FORGE_TRUSTED_PROXY_IPS` is a comma-separated list of reverse-proxy IPs whose `X-Forwarded-For` header should be trusted for login rate limiting. The control-plane private IP is trusted automatically when `FORGE_CONTROL_PLANE_PRIVATE_IP` is set.
+
+Allowed repositories can be added or removed from the Repositories panel. Repositories configured in the control plane's `FORGE_ALLOWED_REPOS` remain read-only in the UI; repositories added from the UI are stored in the control-plane database.
 
 The app intentionally has no third-party Python dependencies.

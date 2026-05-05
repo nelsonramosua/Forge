@@ -105,6 +105,13 @@ type RepoCredential struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+type AllowedRepo struct {
+	RepoFullName string    `json:"repo_full_name"`
+	Source       string    `json:"source"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 type scanner interface {
 	Scan(dest ...interface{}) error
 }
@@ -140,6 +147,10 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	if _, err := s.db.ExecContext(context.Background(), deploymentRetryMigrationSQL); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err := s.db.ExecContext(context.Background(), allowedReposMigrationSQL); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -834,6 +845,46 @@ func (s *Store) HasRepoCredential(ctx context.Context, repoFullName string) (boo
 	return err == nil, err
 }
 
+func (s *Store) UpsertAllowedRepo(ctx context.Context, repoFullName string, source string) error {
+	if source == "" {
+		source = "admin"
+	}
+	now := timestamp(time.Now())
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO allowed_repos(repo_full_name, source, created_at, updated_at)
+VALUES(?, ?, ?, ?)
+ON CONFLICT(repo_full_name) DO UPDATE SET
+  source=excluded.source,
+  updated_at=excluded.updated_at;
+`, repoFullName, source, now, now)
+	return err
+}
+
+func (s *Store) DeleteAllowedRepo(ctx context.Context, repoFullName string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM allowed_repos WHERE repo_full_name=?;`, repoFullName)
+	return err
+}
+
+func (s *Store) ListAllowedRepos(ctx context.Context) ([]AllowedRepo, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT repo_full_name, source, created_at, updated_at
+FROM allowed_repos ORDER BY repo_full_name;
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var repos []AllowedRepo
+	for rows.Next() {
+		repo, err := scanAllowedRepo(rows)
+		if err != nil {
+			return nil, err
+		}
+		repos = append(repos, repo)
+	}
+	return repos, rows.Err()
+}
+
 func (s *Store) ListTaskEventsByDeployment(ctx context.Context, deploymentID int64, limit int, offset int) ([]TaskEvent, error) {
 	if limit <= 0 {
 		limit = 200
@@ -1033,6 +1084,18 @@ func scanRepoCredential(row scanner) (RepoCredential, error) {
 	return cred, nil
 }
 
+func scanAllowedRepo(row scanner) (AllowedRepo, error) {
+	var repo AllowedRepo
+	var createdAt, updatedAt string
+	err := row.Scan(&repo.RepoFullName, &repo.Source, &createdAt, &updatedAt)
+	if err != nil {
+		return AllowedRepo{}, err
+	}
+	repo.CreatedAt = parseTime(createdAt)
+	repo.UpdatedAt = parseTime(updatedAt)
+	return repo, nil
+}
+
 func parseTime(value string) time.Time {
 	if value == "" {
 		return time.Time{}
@@ -1056,3 +1119,6 @@ var observabilityMigrationSQL string
 
 //go:embed migrations/004_deployment_retry_state.sql
 var deploymentRetryMigrationSQL string
+
+//go:embed migrations/005_allowed_repos.sql
+var allowedReposMigrationSQL string

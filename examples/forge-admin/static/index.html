@@ -64,9 +64,13 @@
           <div class="panel-heading">
             <h2>Repositories</h2>
           </div>
+          <form id="repo-form" class="repo-form">
+            <input name="repo" placeholder="owner/repo" required>
+            <button type="submit">Add repo</button>
+          </form>
           <table>
             <thead>
-              <tr><th>Repo</th><th>Credential</th><th>Actions</th></tr>
+              <tr><th>Repo</th><th>Source</th><th>Credential</th><th>Actions</th></tr>
             </thead>
             <tbody id="repos-table"></tbody>
           </table>

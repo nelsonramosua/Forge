@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -275,7 +276,11 @@ func (s *Server) handleManualDeploymentCreate(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	repoFullName, ok := s.allowedRepoName(strings.TrimSpace(req.Repo))
+	repoFullName, ok, err := s.allowedRepoName(r.Context(), strings.TrimSpace(req.Repo))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	if !ok {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "repository is not allowed"})
 		return
@@ -523,23 +528,50 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRepos(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w)
-		return
-	}
 	if !s.authorizeAdmin(w, r) {
 		return
 	}
-	repos := make([]repoView, 0, len(s.cfg.AllowedRepos))
-	for _, repo := range s.cfg.AllowedRepos {
-		hasCredential, err := s.store.HasRepoCredential(r.Context(), repo)
+	switch r.Method {
+	case http.MethodGet:
+		repos, err := s.repoViews(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		repos = append(repos, repoView{Repo: repo, HasCredential: hasCredential})
+		writeJSON(w, http.StatusOK, map[string]interface{}{"repos": repos})
+	case http.MethodPost:
+		var req repoAllowRequest
+		if err := readJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		repoFullName := strings.TrimSpace(req.Repo)
+		if !validRepoName(repoFullName) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repository"})
+			return
+		}
+		if canonical, ok := s.staticAllowedRepoName(repoFullName); ok {
+			view, err := s.repoView(r.Context(), canonical, "config")
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, view)
+			return
+		}
+		if err := s.store.UpsertAllowedRepo(r.Context(), repoFullName, "admin"); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		view, err := s.repoView(r.Context(), repoFullName, "admin")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, view)
+	default:
+		methodNotAllowed(w)
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"repos": repos})
 }
 
 func (s *Server) handleRepoSubroutes(w http.ResponseWriter, r *http.Request) {
@@ -548,16 +580,41 @@ func (s *Server) handleRepoSubroutes(w http.ResponseWriter, r *http.Request) {
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/repos/")
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
-	if len(parts) != 3 || parts[2] != "credential" {
+	if len(parts) != 2 && (len(parts) != 3 || parts[2] != "credential") {
 		http.NotFound(w, r)
 		return
 	}
 	repoFullName := parts[0] + "/" + parts[1]
-	if !validRepoName(repoFullName) || !s.repoAllowed(repoFullName) {
+	if !validRepoName(repoFullName) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repository"})
+		return
+	}
+	canonicalRepo, ok, err := s.allowedRepoName(r.Context(), repoFullName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !ok {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "repository is not allowed"})
 		return
 	}
-	repoFullName, _ = s.allowedRepoName(repoFullName)
+	repoFullName = canonicalRepo
+	if len(parts) == 2 {
+		if r.Method != http.MethodDelete {
+			methodNotAllowed(w)
+			return
+		}
+		if _, ok := s.staticAllowedRepoName(repoFullName); ok {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "repository is configured from environment"})
+			return
+		}
+		if err := s.store.DeleteAllowedRepo(r.Context(), repoFullName); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		has, err := s.store.HasRepoCredential(r.Context(), repoFullName)
@@ -684,12 +741,16 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repository full_name"})
 		return
 	}
-	if !s.repoAllowed(payload.Repository.FullName) {
+	repoFullName, ok, err := s.allowedRepoName(r.Context(), payload.Repository.FullName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !ok {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "repository is not allowed"})
 		return
 	}
-	repoFullName, _ := s.allowedRepoName(payload.Repository.FullName)
-	repoURL, err := s.repoCloneURL(payload)
+	repoURL, err := s.repoCloneURL(r.Context(), payload)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -2287,18 +2348,89 @@ func (s *Server) validateReservedSubdomain(subdomain string, repoFullName string
 	return nil
 }
 
-func (s *Server) repoAllowed(fullName string) bool {
-	_, ok := s.allowedRepoName(fullName)
-	return ok
-}
-
-func (s *Server) allowedRepoName(fullName string) (string, bool) {
+func (s *Server) staticAllowedRepoName(fullName string) (string, bool) {
 	for _, allowed := range s.cfg.AllowedRepos {
 		if strings.EqualFold(allowed, fullName) {
 			return allowed, true
 		}
 	}
 	return "", false
+}
+
+func (s *Server) allowedRepoName(ctx context.Context, fullName string) (string, bool, error) {
+	if allowed, ok := s.staticAllowedRepoName(fullName); ok {
+		return allowed, true, nil
+	}
+	repos, err := s.store.ListAllowedRepos(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	for _, repo := range repos {
+		if strings.EqualFold(repo.RepoFullName, fullName) {
+			return repo.RepoFullName, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func (s *Server) allowedRepoEntries(ctx context.Context) ([]repoView, error) {
+	seen := make(map[string]repoView)
+	for _, repo := range s.cfg.AllowedRepos {
+		repo = strings.TrimSpace(repo)
+		if repo == "" {
+			continue
+		}
+		seen[strings.ToLower(repo)] = repoView{Repo: repo, Source: "config"}
+	}
+	repos, err := s.store.ListAllowedRepos(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, repo := range repos {
+		if repo.RepoFullName == "" {
+			continue
+		}
+		key := strings.ToLower(repo.RepoFullName)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		source := repo.Source
+		if source == "" {
+			source = "admin"
+		}
+		seen[key] = repoView{Repo: repo.RepoFullName, Source: source}
+	}
+	result := make([]repoView, 0, len(seen))
+	for _, repo := range seen {
+		result = append(result, repo)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return strings.ToLower(result[i].Repo) < strings.ToLower(result[j].Repo)
+	})
+	return result, nil
+}
+
+func (s *Server) repoViews(ctx context.Context) ([]repoView, error) {
+	repos, err := s.allowedRepoEntries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range repos {
+		hasCredential, err := s.store.HasRepoCredential(ctx, repos[i].Repo)
+		if err != nil {
+			return nil, err
+		}
+		repos[i].HasCredential = hasCredential
+	}
+	return repos, nil
+}
+
+func (s *Server) repoView(ctx context.Context, repoFullName string, source string) (repoView, error) {
+	hasCredential, err := s.store.HasRepoCredential(ctx, repoFullName)
+	if err != nil {
+		return repoView{}, err
+	}
+	return repoView{Repo: repoFullName, Source: source, HasCredential: hasCredential}, nil
 }
 
 func (s *Server) branchAllowed(branch string) bool {
@@ -2310,7 +2442,7 @@ func (s *Server) branchAllowed(branch string) bool {
 	return false
 }
 
-func (s *Server) repoCloneURL(payload githubPushPayload) (string, error) {
+func (s *Server) repoCloneURL(ctx context.Context, payload githubPushPayload) (string, error) {
 	if s.cfg.AllowLocalRepos && strings.HasPrefix(strings.ToLower(payload.Repository.FullName), "local/") {
 		repoURL := strings.TrimSpace(payload.Repository.CloneURL)
 		if repoURL == "" {
@@ -2333,7 +2465,10 @@ func (s *Server) repoCloneURL(payload githubPushPayload) (string, error) {
 	if !validRepoName(payload.Repository.FullName) {
 		return "", fmt.Errorf("invalid repository full_name")
 	}
-	allowedRepo, ok := s.allowedRepoName(payload.Repository.FullName)
+	allowedRepo, ok, err := s.allowedRepoName(ctx, payload.Repository.FullName)
+	if err != nil {
+		return "", err
+	}
 	if !ok {
 		return "", fmt.Errorf("repository is not allowed")
 	}
@@ -2472,6 +2607,7 @@ type deploymentView struct {
 
 type repoView struct {
 	Repo          string `json:"repo"`
+	Source        string `json:"source"`
 	HasCredential bool   `json:"has_credential"`
 }
 
@@ -2494,6 +2630,10 @@ type manualDeploymentCreateRequest struct {
 	Repo      string `json:"repo"`
 	Branch    string `json:"branch"`
 	CommitSHA string `json:"commit_sha"`
+}
+
+type repoAllowRequest struct {
+	Repo string `json:"repo"`
 }
 
 type agentRegisterRequest struct {
