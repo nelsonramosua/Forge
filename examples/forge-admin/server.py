@@ -7,9 +7,19 @@ import urllib.error
 import urllib.request
 from http.cookies import SimpleCookie
 
+def control_plane_url() -> str:
+    explicit_url = os.environ.get("FORGE_CONTROL_PLANE_URL", "").strip()
+    if explicit_url:
+        return explicit_url.rstrip("/")
+    private_ip = os.environ.get("FORGE_CONTROL_PLANE_PRIVATE_IP", "").strip()
+    if private_ip:
+        return "http://{}:8080".format(private_ip)
+    raise RuntimeError("set FORGE_CONTROL_PLANE_URL or FORGE_CONTROL_PLANE_PRIVATE_IP")
+
+
 ADMIN_TOKEN = os.environ["FORGE_ADMIN_TOKEN"]
 CONSOLE_PASSWORD = os.environ["FORGE_ADMIN_CONSOLE_PASSWORD"]
-CP_URL = os.environ["FORGE_CONTROL_PLANE_URL"].rstrip("/")
+CP_URL = control_plane_url()
 PORT = int(os.environ.get("PORT", 8000))
 SESSION_TTL_SECONDS = int(os.environ.get("FORGE_ADMIN_SESSION_TTL_SECONDS", 3600))
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")

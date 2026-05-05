@@ -252,6 +252,8 @@ jobs:
           chmod 600 ~/.vault_pass
 
       - name: Write Ansible Vault group variables
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           # The real vault.yml is generated from GitHub Secrets to avoid
           # storing encrypted files in the repo that depend on a rotated password.
@@ -267,6 +269,11 @@ jobs:
             - ${{ secrets.FORGE_ALLOWED_REPOS }}
           vault_grafana_admin_password: "${{ secrets.GRAFANA_ADMIN_PASSWORD }}"
           EOF
+          if [ -n "${CLOUDFLARE_API_TOKEN}" ]; then
+            cat > infra/ansible/group_vars/all/main.local.yml << EOF
+          forge_caddy_dns_cloudflare_enabled: true
+          EOF
+          fi
 
       - name: Determine Ansible limit
         id: limit

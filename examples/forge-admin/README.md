@@ -19,7 +19,9 @@ Required environment variables:
 
 - `FORGE_ADMIN_TOKEN`
 - `FORGE_ADMIN_CONSOLE_PASSWORD`
-- `FORGE_CONTROL_PLANE_URL`
+- `FORGE_CONTROL_PLANE_PRIVATE_IP` (preferred), or `FORGE_CONTROL_PLANE_URL`
+
+When `FORGE_CONTROL_PLANE_PRIVATE_IP` is set, the console proxies the control plane at `http://FORGE_CONTROL_PLANE_PRIVATE_IP:8080`. Set `FORGE_CONTROL_PLANE_URL` only when you need to override that derived URL.
 
 Optional environment variables:
 

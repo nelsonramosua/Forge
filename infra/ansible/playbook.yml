@@ -388,7 +388,7 @@
     - name: Reload caddy
       ansible.builtin.systemd:
         name: caddy
-        state: reloaded
+        state: "{{ 'restarted' if forge_caddy_dns_cloudflare_enabled | bool else 'reloaded' }}"
         daemon_reload: true
 
     - name: Restart forge-control-plane
