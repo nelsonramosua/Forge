@@ -374,7 +374,7 @@ ssh -i "$SSH_KEY" \
 ## 10. GitHub End-To-End Test
 
 The first GitHub E2E can use a public repository. Private repositories are supported after you register
-an encrypted repo credential through the admin API:
+an encrypted repo or owner credential through the admin API or admin console:
 
 ```sh
 curl -X PUT "https://BASE_DOMAIN/api/v1/repos/OWNER/REPO/credential" \
@@ -383,7 +383,7 @@ curl -X PUT "https://BASE_DOMAIN/api/v1/repos/OWNER/REPO/credential" \
   -d '{"token":"github_pat_..."}'
 ```
 
-The repository still must be listed in `forge_allowed_repos`.
+Use `/api/v1/repos/OWNER/credential` instead to cover every allowed repo under the same owner/org. A repo-level credential overrides an owner-level credential. The repository still must be allowed: either listed in `forge_allowed_repos` at startup or added later through the admin console/API.
 
 The bundled admin console lives in `examples/forge-admin`. To deploy it, publish that repository, set `FORGE_ADMIN_APP_REPO` (or `forge_admin_app_repo` in Ansible vars) to that repo, and deploy an app whose `forge.yaml` uses `name: admin`.
 

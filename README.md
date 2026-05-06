@@ -102,7 +102,7 @@ GitHub push
     ▼
 POST /api/v1/webhook/github
     │  verify X-Hub-Signature-256 (HMAC-SHA256)
-    │  check repo in FORGE_ALLOWED_REPOS
+    │  check repo in the effective allowlist
     │  check branch in FORGE_ALLOWED_BRANCHES
     │  validate commit SHA format (40 or 64 hex chars)
     │  git clone --depth=1 -> parse forge.yaml
@@ -157,6 +157,8 @@ deployments row: status=pending
 ```
 
 If health checks fail: agent kills the process (SIGTERM -> 5s -> SIGKILL), reports `failed`, control plane rolls back the Caddy route to the previous running deployment.
+
+Manual deployments use the same manifest parsing and scheduling path. `POST /api/v1/deployments` validates the repo and branch, resolves HEAD inside the control plane when no commit is supplied, parses `forge.yaml`, creates a pending deployment, and returns the resolved deployment view. Rollbacks create a new deployment from the selected deployment's stored `repo_url` and `commit_sha`, then re-parse `forge.yaml` at that commit.
 
 ---
 
@@ -337,10 +339,15 @@ All admin endpoints require `Authorization: Bearer $FORGE_ADMIN_TOKEN`. Agent en
 | `DELETE` | `/api/v1/deployments/{id}` | admin | Cancel pending work or stop a running deployment |
 | `PUT` | `/api/v1/apps/{app}/secrets/{key}` | admin | Encrypt and store a secret |
 | `GET` | `/api/v1/apps/{app}/secrets` | admin | List secret key names (not values) |
-| `GET` | `/api/v1/repos` | admin | List allowed repos and credential status |
+| `GET` | `/api/v1/repos` | admin | List allowed repos, source, credential status, and credential scope |
+| `POST` | `/api/v1/repos` | admin | Add an admin-managed allowed repo |
+| `DELETE` | `/api/v1/repos/{owner}/{repo}` | admin | Remove an admin-managed allowed repo |
 | `PUT` | `/api/v1/repos/{owner}/{repo}/credential` | admin | Store an encrypted GitHub repo token |
 | `GET` | `/api/v1/repos/{owner}/{repo}/credential` | admin | Check whether a repo credential exists |
 | `DELETE` | `/api/v1/repos/{owner}/{repo}/credential` | admin | Delete a repo credential |
+| `PUT` | `/api/v1/repos/{owner}/credential` | admin | Store an encrypted GitHub token for all allowed repos under an owner/org |
+| `GET` | `/api/v1/repos/{owner}/credential` | admin | Check whether an owner/org credential exists |
+| `DELETE` | `/api/v1/repos/{owner}/credential` | admin | Delete an owner/org credential |
 | `GET` | `/healthz` | none | Control plane health check |
 | `GET` | `/metrics` | loopback or admin | Prometheus metrics |
 
@@ -354,28 +361,44 @@ All admin endpoints require `Authorization: Bearer $FORGE_ADMIN_TOKEN`. Agent en
 | `FORGE_AGENT_TOKEN` | YES | — | Shared token for agent ↔ control plane authentication |
 | `FORGE_ADMIN_TOKEN` | YES | — | Token for admin API endpoints |
 | `FORGE_GITHUB_WEBHOOK_SECRET` | YES | — | GitHub webhook secret for HMAC-SHA256 verification |
-| `FORGE_ALLOWED_REPOS` | YES | — | Comma-separated `owner/repo` allowlist |
+| `FORGE_ALLOWED_REPOS` | YES | — | Comma-separated startup `owner/repo` allowlist; admin-managed repos can be added later through the admin API/UI |
 | `FORGE_ALLOWED_BRANCHES` | — | `main` | Comma-separated branch allowlist |
 | `FORGE_ADMIN_APP_NAME` | — | `admin` | App name reserved for the Forge admin console |
 | `FORGE_ADMIN_APP_REPO` | — | — | `owner/repo` allowed to deploy the reserved `admin` subdomain |
 | `FORGE_BASE_DOMAIN` | — | `forge.localhost` | Base domain for app subdomains |
 | `FORGE_ADDR` | — | `:8080` | Control plane listen address |
 | `FORGE_DB_PATH` | — | `data/forge.db` | SQLite database path |
+| `FORGE_WORK_DIR` | — | `data/work` | Control-plane temporary clone/work directory |
 | `FORGE_CADDY_ADMIN_URL` | — | — | Caddy Admin API URL (e.g. `http://127.0.0.1:2019`) |
+| `FORGE_ONLINE_WINDOW` | — | `15s` | Agent heartbeat freshness window |
+| `FORGE_SCHEDULER_TICK` | — | `2s` | Scheduler polling interval |
+| `FORGE_TASK_POLL_TIMEOUT` | — | `25s` | Agent long-poll timeout |
+| `FORGE_DEPLOYMENT_LEASE_TIMEOUT` | — | `15m` | Timeout for stale deployment work reconciliation |
+| `FORGE_TASK_LEASE_TIMEOUT` | — | `15m` | Timeout for stale in-progress task reconciliation |
 | `FORGE_APP_PORT_START` | — | `20000` | Start of app port range |
 | `FORGE_APP_PORT_END` | — | `39999` | End of app port range |
-| `FORGE_AGENT_TOKEN` | YES | — | Agent: token to authenticate with control plane |
+| `FORGE_ALLOW_LOCAL_REPOS` | — | `false` | Test-only local repository clone support |
+| `FORGE_MAX_SCHEDULE_BATCH` | — | `20` | Max pending deployments considered per scheduler tick |
+| `FORGE_MAX_TASKS_PER_AGENT` | — | `1` | Max active tasks assigned to one agent |
 | `FORGE_CONTROL_PLANE_URL` | — | `http://127.0.0.1:8080` | Agent: control plane URL |
+| `FORGE_AGENT_ID` | — | hostname | Agent: stable worker ID |
+| `FORGE_AGENT_ADDRESS` | — | auto-detected | Agent: address Caddy uses to reach app ports |
+| `FORGE_AGENT_APP_ROOT` | — | `/var/lib/forge-agent/apps` | Agent: app workspace root |
 | `FORGE_RUNNER_PATH` | — | `./bin/forge-build-runner` | Agent: path to build runner binary |
-| `FORGE_REQUIRE_ISOLATION` | — | `false` (`true` in prod) | Agent: fail build if Linux namespaces unavailable |
+| `FORGE_REQUIRE_ISOLATION` | — | `true` | Agent: fail build if Linux namespaces unavailable |
 | `FORGE_BUILD_TIMEOUT` | — | `0` (disabled) | Agent: max build time in seconds |
 | `FORGE_AGENT_POLL_SECONDS` | — | `2` | Agent: task poll interval |
+| `FORGE_METRICS_SOCKET` | — | `/tmp/forge-agent-metrics.sock` | Agent: Unix socket for worker metrics |
+| `FORGE_EXPORTER_ADDR` | — | `:9108` | Exporter listen address |
+| `FORGE_AGENT_METRICS_SOCKET` | — | `/tmp/forge-agent-metrics.sock` | Exporter source Unix socket |
 
 ---
 
 ### Private Repositories
 
-Forge stores private repository credentials encrypted at rest. Register a credential for an allowed repo:
+Forge stores private repository credentials encrypted at rest. Public repositories clone without credentials. Private repositories can use either a repo-level credential for one allowed `owner/repo`, or an owner-level credential for every allowed repository under that owner/org.
+
+Register a repo-level credential:
 
 ```sh
 curl -X PUT "https://$FORGE_BASE_DOMAIN/api/v1/repos/OWNER/REPO/credential" \
@@ -383,6 +406,17 @@ curl -X PUT "https://$FORGE_BASE_DOMAIN/api/v1/repos/OWNER/REPO/credential" \
   -H "Content-Type: application/json" \
   -d '{"token":"github_pat_..."}'
 ```
+
+Register an owner-level credential:
+
+```sh
+curl -X PUT "https://$FORGE_BASE_DOMAIN/api/v1/repos/OWNER/credential" \
+  -H "Authorization: Bearer $FORGE_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"token":"github_pat_..."}'
+```
+
+Credential lookup is `owner/repo` first, then `owner`, then unauthenticated clone. Existing repo-level credentials continue to work and override owner-level credentials.
 
 The clean `https://github.com/OWNER/REPO.git` URL remains in deployments and task payloads. Agents request the credential only when they need to clone/fetch the assigned task, and the token is passed to `git` through `GIT_ASKPASS`, not through command arguments.
 

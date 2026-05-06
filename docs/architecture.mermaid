@@ -3,16 +3,16 @@
 flowchart LR
  subgraph UI["Public UI"]
     direction TB
-        LAND["Forge landing page<br>/ -> /api/v1/status"]
-        ADMINAPP["Forge admin console<br>examples/forge-admin<br>reserved admin subdomain"]
+        LAND["Forge landing page<br>/ -> /api/v1/status<br>embedded static assets"]
+        ADMINAPP["Forge admin console<br>interactive operations UI<br>reserved admin subdomain"]
   end
  subgraph CP["Control Plane - Go"]
     direction TB
         SRV["HTTP Server<br>/webhook - /events SSE<br>/agents - /apps - /repos<br>/deployments - /metrics"]
-        AUTH["Auth / Validation<br>admin token - agent token<br>webhook signature - allowed repos"]
+        AUTH["Auth / Validation<br>admin token - agent token<br>webhook signature - effective allowlist"]
         SCH["Scheduler<br>agent selection<br>stale work sweep<br>retry queue - health reconcile"]
-        VAULT["Secret Vault<br>AES-256-GCM<br>repo credentials + app env"]
-        DB[("SQLite WAL<br>agents - deployments<br>tasks - events + request_id<br>health - retry state<br>encrypted secrets - repo creds")]
+        VAULT["Secret Vault<br>AES-256-GCM<br>repo/owner credentials + app env"]
+        DB[("SQLite WAL<br>agents - deployments<br>tasks - events + request_id<br>health - retry state<br>encrypted secrets - repo creds<br>admin-managed allowed repos")]
         CADCLI["Caddy Client<br>Admin API :2019<br>route reconciliation"]
         RETRY["Retry State<br>backoff + queueing<br>latest failed deployment"]
   end
@@ -29,7 +29,7 @@ flowchart LR
  subgraph EDGE["Edge / Reverse Proxy"]
     direction TB
         CDY["Caddy<br>HTTP -> HTTPS<br>On-Demand TLS<br>dynamic JSON routes"]
-        TLS["TLS Automation<br>ACME certificates<br>wildcard app domains"]
+        TLS["TLS Automation<br>ACME certificates<br>On-Demand TLS<br>optional DNS-01"]
         ROUTE["Routing Table<br>app.nforge.space<br>-> worker-private-ip:$PORT"]
   end
  subgraph OBS["Observability"]
@@ -56,6 +56,7 @@ flowchart LR
     CDY --> TLS & ROUTE
     PROM --> GRAF & AM
     GH["GitHub<br><b>Push webhook</b><br>HMAC-SHA256 - repo/branch allowlist"] -- POST /api/v1/webhook/github --> SRV
+    ADMINAPP -- "manual deploy<br>redeploy HEAD<br>rollback - stop - retry<br>secrets - credentials" --> SRV
     SRV -- "private VPC HTTP<br>poll - claim - complete<br>logs - heartbeat - request_id" --> AGT
     AGT -- task events<br>deployment status --> SRV
     CADCLI -- POST /load<br>dynamic route config --> CDY

@@ -5,6 +5,7 @@
 - `ForgeNoOnlineAgents` alert fires.
 - `/metrics` on the control plane reports `forge_agents_online 0`.
 - Pending deployments remain in `pending` and no build tasks are claimed.
+- Existing running deployments may show unhealthy observations such as `assigned agent is offline`, but they should not be marked failed solely because the agent missed heartbeats.
 
 ## Triage
 

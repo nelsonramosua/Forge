@@ -12,6 +12,13 @@ go vet ./...
 ./bin/forge-build-runner --require-isolation --workdir /tmp --cgroup strict-smoke -- /bin/sh -lc /bin/true
 ```
 
+For closer CI parity, run these if the tools are installed locally:
+
+```sh
+golangci-lint run --timeout=5m
+govulncheck ./...
+```
+
 Run the local end-to-end harness:
 
 ```sh
@@ -24,6 +31,10 @@ Security checks covered by unit/E2E tests:
 
 - Control-plane startup fails if required tokens, webhook secret, master key, or repository allowlist are missing.
 - GitHub webhooks require `X-Hub-Signature-256`, `X-GitHub-Event: push`, an allowed `owner/repo`, an allowed branch, and a hex commit SHA.
+- Manual deployments reject unknown repos/branches, resolve HEAD server-side, and do not create a deployment if manifest cloning fails.
+- Rollbacks create a new deployment from the source deployment's stored `repo_url` and `commit_sha`, then re-parse `forge.yaml` at that commit.
+- Repository credentials can be stored at repo or owner/org scope; repo-level credentials override owner-level credentials, and neither logs nor task payload APIs expose plaintext tokens.
+- Admin-managed allowed repos are stored separately from startup `FORGE_ALLOWED_REPOS`; config-sourced repos remain read-only through the API/UI.
 - Deployments use dynamically allocated app ports from `20000-39999`.
 - `forge.yaml` parsing rejects unknown fields and accepts normal quoted YAML values.
 - Production worker builds require Linux namespace isolation instead of falling back to plain `fork()`.
@@ -62,5 +73,5 @@ ssh ubuntu@CONTROL_PLANE_PUBLIC_IP 'curl -fsS http://WORKER_PRIVATE_IP:9108/metr
 - Invalid health path: run task should enter `failed`.
 - Stopped worker: new deployments remain `pending` until an agent comes back online.
 - Unsigned webhook: request should return `401`.
-- Repo not in `FORGE_ALLOWED_REPOS`: request should return `403`.
+- Repo not in the effective allowlist (`FORGE_ALLOWED_REPOS` plus admin-managed allowed repos): request should return `403`.
 - Unsafe commit SHA such as `--help`: request should return `400`.

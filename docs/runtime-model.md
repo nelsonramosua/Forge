@@ -25,11 +25,11 @@ run:
 
 Do not add every application package to the Forge Ansible playbook. The playbook should install runtime managers and safe baseline tools, not each app's libraries.
 
-The worker service runs as the unprivileged `forge` user. Build and run commands still execute shell defined by the application repository, so only repositories listed in `FORGE_ALLOWED_REPOS` should be allowed to trigger deployments.
+The worker service runs as the unprivileged `forge` user. Build and run commands still execute shell defined by the application repository, so only repositories in the effective allowlist should be allowed to trigger deployments. The effective allowlist is the startup `FORGE_ALLOWED_REPOS` set plus admin-managed repositories stored in the control-plane database.
 The systemd unit also denies access to common instance metadata addresses, so application commands should not be able to read cloud metadata from the worker.
-Production workers set `FORGE_REQUIRE_ISOLATION=true`, which makes build tasks fail closed if the build runner cannot create Linux namespaces.
+Workers default to `FORGE_REQUIRE_ISOLATION=true`, which makes build tasks fail closed if the build runner cannot create Linux namespaces.
 
-The control plane now also serves a public landing page and `/api/v1/status`, stores encrypted repo credentials per allowed `owner/repo`, and reserves the `admin` subdomain for the bundled Forge admin console when `FORGE_ADMIN_APP_REPO` is configured.
+The control plane also serves a public landing page and `/api/v1/status`, stores encrypted repo credentials at repo or owner/org scope, and reserves the `admin` subdomain for the bundled Forge admin console when `FORGE_ADMIN_APP_REPO` is configured. Credential lookup tries `owner/repo` first, then `owner`, then unauthenticated clone for public repositories.
 
 ## Ports
 

@@ -23,7 +23,9 @@
    `curl -X PUT -H "Authorization: Bearer $FORGE_ADMIN_TOKEN" -H "Content-Type: application/json" -d '{"value":"..."}' http://CONTROL_PLANE:8080/api/v1/apps/APP/secrets/KEY`
 3. If the deployment was marked failed with retryable state, requeue it directly:
    `curl -X POST -H "Authorization: Bearer $FORGE_ADMIN_TOKEN" http://CONTROL_PLANE:8080/api/v1/deployments/DEPLOYMENT_ID/retry`
-4. Push a new commit to trigger a fresh deployment.
+4. To redeploy without a new commit, use the admin console's Redeploy HEAD action or call `POST /api/v1/deployments` with the repo and branch.
+5. To return to a previous commit, use the admin console's Rollback action or call `POST /api/v1/deployments/DEPLOYMENT_ID/rollback`.
+6. Push a new commit to trigger a fresh deployment when the fix lives in source control.
 
 ## Prevention
 
