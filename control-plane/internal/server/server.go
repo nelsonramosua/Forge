@@ -7,11 +7,13 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -23,8 +25,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	_ "embed"
 
 	"forge/control-plane/internal/config"
 	"forge/control-plane/internal/forgeyaml"
@@ -43,6 +43,9 @@ type Server struct {
 
 //go:embed static/index.html
 var landingPageHTML []byte
+
+//go:embed static/site.webmanifest static/forgeLogos/*
+var landingStaticFiles embed.FS
 
 const (
 	deploymentReconcileInterval = 30 * time.Second
@@ -158,6 +161,8 @@ func (s *Server) routes(ctx context.Context) http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/api/v1/status", s.handlePublicStatus)
+	mux.HandleFunc("/site.webmanifest", s.handleLandingStatic)
+	mux.HandleFunc("/forgeLogos/", s.handleLandingStatic)
 	mux.HandleFunc("/api/v1/tls/ask", s.handleTLSAsk)
 	mux.HandleFunc("/api/v1/events", func(w http.ResponseWriter, r *http.Request) {
 		if !s.authorizeAdmin(w, r) {
@@ -197,6 +202,19 @@ func (s *Server) handleLandingPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(landingPageHTML)
+}
+
+func (s *Server) handleLandingStatic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		methodNotAllowed(w)
+		return
+	}
+	staticRoot, err := fs.Sub(landingStaticFiles, "static")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	http.FileServer(http.FS(staticRoot)).ServeHTTP(w, r)
 }
 
 func (s *Server) handlePublicStatus(w http.ResponseWriter, r *http.Request) {
@@ -2169,6 +2187,7 @@ func (s *Server) cloneParseResolveForgeYAML(ctx context.Context, repoURL string,
 			return forgeyaml.Config{}, "", fmt.Errorf("git checkout failed for %s", repoFullName)
 		}
 	} else {
+		// #nosec G204 -- target is a freshly created clone directory under the configured work dir; remaining args are constants.
 		checkout := exec.CommandContext(cloneCtx, "git", "-C", target, "checkout", "--detach", "HEAD")
 		checkout.Env = gitEnv
 		if output, err := checkout.CombinedOutput(); err != nil {
@@ -2176,6 +2195,7 @@ func (s *Server) cloneParseResolveForgeYAML(ctx context.Context, repoURL string,
 			return forgeyaml.Config{}, "", fmt.Errorf("git checkout failed for %s", repoFullName)
 		}
 	}
+	// #nosec G204 -- target is a freshly created clone directory under the configured work dir; remaining args are constants.
 	revParse := exec.CommandContext(cloneCtx, "git", "-C", target, "rev-parse", "HEAD")
 	revParse.Env = gitEnv
 	output, err := revParse.Output()

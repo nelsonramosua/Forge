@@ -38,7 +38,8 @@ func newManualDeployTestServer(t *testing.T) (*Server, http.Handler, *store.Stor
 		AdminAppRepo:     "example/admin",
 		WorkDir:          t.TempDir(),
 	}, st, vt)
-	return srv, srv.routes(context.Background()), st
+	handler := srv.routes(context.Background())
+	return srv, handler, st
 }
 
 func TestManualDeploymentResolvesHeadServerSide(t *testing.T) {
@@ -238,7 +239,7 @@ func configureGitInsteadOf(t *testing.T, remote string, localRepo string) {
 
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(context.Background(), "git", args...)
 	cmd.Dir = dir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v failed: %v\n%s", args, err, output)
@@ -247,7 +248,7 @@ func gitRun(t *testing.T, dir string, args ...string) {
 
 func gitOutput(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(context.Background(), "git", args...)
 	cmd.Dir = dir
 	output, err := cmd.Output()
 	if err != nil {
