@@ -484,6 +484,9 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	if agents == nil {
+		agents = []store.Agent{}
+	}
 	writeJSON(w, http.StatusOK, agents)
 }
 
@@ -584,6 +587,10 @@ func (s *Server) handleRepoSubroutes(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "credential" {
+		s.handleOwnerCredential(w, r, parts[0])
+		return
+	}
 	repoFullName := parts[0] + "/" + parts[1]
 	if !validRepoName(repoFullName) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repository"})
@@ -617,16 +624,49 @@ func (s *Server) handleRepoSubroutes(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		has, err := s.store.HasRepoCredential(r.Context(), repoFullName)
+		credentialKey, has, err := s.repoCredentialKey(r.Context(), repoFullName)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"repo": repoFullName, "has_credential": has})
+		writeJSON(w, http.StatusOK, map[string]interface{}{"repo": repoFullName, "has_credential": has, "credential_scope": credentialScope(repoFullName, credentialKey)})
 	case http.MethodPut:
 		s.handleRepoCredentialPut(w, r, repoFullName)
 	case http.MethodDelete:
 		if err := s.store.DeleteRepoCredential(r.Context(), repoFullName); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (s *Server) handleOwnerCredential(w http.ResponseWriter, r *http.Request, owner string) {
+	if !safeRepoPart(owner) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid owner"})
+		return
+	}
+	if ok, err := s.ownerAllowed(r.Context(), owner); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	} else if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "owner has no allowed repositories"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		has, err := s.store.HasRepoCredential(r.Context(), owner)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"owner": owner, "has_credential": has})
+	case http.MethodPut:
+		s.handleRepoCredentialPut(w, r, owner)
+	case http.MethodDelete:
+		if err := s.store.DeleteRepoCredential(r.Context(), owner); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -1910,7 +1950,7 @@ func (s *Server) taskPayload(ctx context.Context, deployment store.Deployment, a
 	repoFullName := repoFullNameFromURL(deployment.RepoURL)
 	hasRepoCredential := false
 	if repoFullName != "" {
-		has, err := s.store.HasRepoCredential(ctx, repoFullName)
+		_, has, err := s.repoCredentialKey(ctx, repoFullName)
 		if err != nil {
 			return nil, err
 		}
@@ -2161,18 +2201,46 @@ func (s *Server) resolveRepoToken(ctx context.Context, repoFullName string) (str
 	if repoFullName == "" {
 		return "", nil
 	}
-	cred, ok, err := s.store.GetRepoCredential(ctx, repoFullName)
+	credentialKey, ok, err := s.repoCredentialKey(ctx, repoFullName)
 	if err != nil {
 		return "", err
 	}
 	if !ok {
 		return "", nil
 	}
-	token, err := s.vault.Decrypt(cred.Nonce, cred.Ciphertext, repoCredentialAAD(repoFullName))
+	cred, ok, err := s.store.GetRepoCredential(ctx, credentialKey)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", nil
+	}
+	token, err := s.vault.Decrypt(cred.Nonce, cred.Ciphertext, repoCredentialAAD(credentialKey))
 	if err != nil {
 		return "", fmt.Errorf("decrypt repo credential: %w", err)
 	}
 	return token, nil
+}
+
+func (s *Server) repoCredentialKey(ctx context.Context, repoFullName string) (string, bool, error) {
+	if repoFullName == "" {
+		return "", false, nil
+	}
+	if has, err := s.store.HasRepoCredential(ctx, repoFullName); err != nil {
+		return "", false, err
+	} else if has {
+		return repoFullName, true, nil
+	}
+	owner, _, ok := strings.Cut(repoFullName, "/")
+	if !ok || owner == "" {
+		return "", false, nil
+	}
+	if has, err := s.store.HasRepoCredential(ctx, owner); err != nil {
+		return "", false, err
+	} else if has {
+		return owner, true, nil
+	}
+	return "", false, nil
 }
 
 func writeAskpassHelper() (string, func(), error) {
@@ -2416,21 +2484,46 @@ func (s *Server) repoViews(ctx context.Context) ([]repoView, error) {
 		return nil, err
 	}
 	for i := range repos {
-		hasCredential, err := s.store.HasRepoCredential(ctx, repos[i].Repo)
+		credentialKey, hasCredential, err := s.repoCredentialKey(ctx, repos[i].Repo)
 		if err != nil {
 			return nil, err
 		}
 		repos[i].HasCredential = hasCredential
+		repos[i].CredentialScope = credentialScope(repos[i].Repo, credentialKey)
 	}
 	return repos, nil
 }
 
 func (s *Server) repoView(ctx context.Context, repoFullName string, source string) (repoView, error) {
-	hasCredential, err := s.store.HasRepoCredential(ctx, repoFullName)
+	credentialKey, hasCredential, err := s.repoCredentialKey(ctx, repoFullName)
 	if err != nil {
 		return repoView{}, err
 	}
-	return repoView{Repo: repoFullName, Source: source, HasCredential: hasCredential}, nil
+	return repoView{Repo: repoFullName, Source: source, HasCredential: hasCredential, CredentialScope: credentialScope(repoFullName, credentialKey)}, nil
+}
+
+func credentialScope(repoFullName string, credentialKey string) string {
+	if credentialKey == "" {
+		return ""
+	}
+	if strings.EqualFold(repoFullName, credentialKey) {
+		return "repo"
+	}
+	return "owner:" + credentialKey
+}
+
+func (s *Server) ownerAllowed(ctx context.Context, owner string) (bool, error) {
+	repos, err := s.allowedRepoEntries(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, repo := range repos {
+		repoOwner, _, ok := strings.Cut(repo.Repo, "/")
+		if ok && strings.EqualFold(repoOwner, owner) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *Server) branchAllowed(branch string) bool {
@@ -2606,9 +2699,10 @@ type deploymentView struct {
 }
 
 type repoView struct {
-	Repo          string `json:"repo"`
-	Source        string `json:"source"`
-	HasCredential bool   `json:"has_credential"`
+	Repo            string `json:"repo"`
+	Source          string `json:"source"`
+	HasCredential   bool   `json:"has_credential"`
+	CredentialScope string `json:"credential_scope,omitempty"`
 }
 
 func methodNotAllowed(w http.ResponseWriter) {

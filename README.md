@@ -384,13 +384,9 @@ curl -X PUT "https://$FORGE_BASE_DOMAIN/api/v1/repos/OWNER/REPO/credential" \
   -d '{"token":"github_pat_..."}'
 ```
 
-The clean `https://github.com/OWNER/REPO.git` URL remains in deployments and task payloads. Agents request
-the credential only when they need to clone/fetch the assigned task, and the token is passed to `git`
-through `GIT_ASKPASS`, not through command arguments.
+The clean `https://github.com/OWNER/REPO.git` URL remains in deployments and task payloads. Agents request the credential only when they need to clone/fetch the assigned task, and the token is passed to `git` through `GIT_ASKPASS`, not through command arguments.
 
-The `admin` subdomain is reserved. To deploy the bundled admin console at `admin.$FORGE_BASE_DOMAIN`,
-set `FORGE_ADMIN_APP_REPO` to the console app repository and deploy an app whose `forge.yaml` uses
-`name: admin`.
+The `admin` subdomain is reserved. To deploy the bundled admin console at `admin.$FORGE_BASE_DOMAIN`, set `FORGE_ADMIN_APP_REPO` to the console app repository and deploy an app whose `forge.yaml` uses `name: admin`.
 
 ---
 

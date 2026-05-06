@@ -57,6 +57,23 @@ function repoFromURL(url) {
   return match ? match[1] : '';
 }
 
+function repoOwner(repo) {
+  return (repo || '').split('/')[0] || '';
+}
+
+function credentialLabel(repo) {
+  if (!repo.has_credential) {
+    return 'missing';
+  }
+  if (repo.credential_scope === 'repo') {
+    return 'repo-level';
+  }
+  if ((repo.credential_scope || '').startsWith('owner:')) {
+    return `owner-level (${repo.credential_scope.slice(6)})`;
+  }
+  return 'configured';
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {...options, cache: 'no-store'});
   if (response.status === 401) {
@@ -77,6 +94,10 @@ async function api(path, options = {}) {
 
 function isAuthError(error) {
   return error && (error.status === 401 || error.message === 'not authenticated');
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 function showLogin() {
@@ -133,10 +154,13 @@ function renderRepos() {
     const row = document.createElement('tr');
     td(row, repo.repo);
     td(row, repo.source || 'config');
-    td(row, repo.has_credential ? 'configured' : 'missing');
+    td(row, credentialLabel(repo));
+    const owner = repoOwner(repo.repo);
     actionCell(row, [
-      button('Set token', 'set-credential', {repo: repo.repo}),
-      repo.has_credential ? button('Delete', 'delete-credential', {repo: repo.repo}, true) : null,
+      button('Set repo token', 'set-credential', {repo: repo.repo}),
+      owner ? button('Set owner token', 'set-owner-credential', {owner}) : null,
+      repo.credential_scope === 'repo' ? button('Delete repo token', 'delete-credential', {repo: repo.repo}, true) : null,
+      repo.credential_scope === `owner:${owner}` ? button('Delete owner token', 'delete-owner-credential', {owner}, true) : null,
       repo.source === 'admin' ? button('Remove repo', 'remove-repo', {repo: repo.repo}, true) : null,
     ]);
     reposTable.appendChild(row);
@@ -280,13 +304,13 @@ async function refresh() {
     api('/api/v1/apps'),
     api('/api/v1/deployments'),
   ]);
-  state.repos = repos.repos || [];
-  state.workers = workers;
-  state.apps = apps;
-  state.deployments = deployments;
-  setText('workers-count', workers.length);
-  setText('apps-count', apps.length);
-  setText('deployments-count', deployments.length);
+  state.repos = asArray(repos && repos.repos);
+  state.workers = asArray(workers);
+  state.apps = asArray(apps);
+  state.deployments = asArray(deployments);
+  setText('workers-count', state.workers.length);
+  setText('apps-count', state.apps.length);
+  setText('deployments-count', state.deployments.length);
   renderRepos();
   renderApps();
   renderDeployments();
@@ -420,9 +444,22 @@ async function runAction(action, data) {
       });
     }
   }
+  if (action === 'set-owner-credential') {
+    const token = await promptValue(`GitHub token for ${data.owner}`);
+    if (token) {
+      await api(`/api/v1/repos/${data.owner}/credential`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token}),
+      });
+    }
+  }
   if (action === 'delete-credential' && await confirmAction('Delete credential', `Delete credential for ${data.repo}?`)) {
     const [owner, name] = data.repo.split('/');
     await api(`/api/v1/repos/${owner}/${name}/credential`, {method: 'DELETE'});
+  }
+  if (action === 'delete-owner-credential' && await confirmAction('Delete owner credential', `Delete credential for ${data.owner}?`)) {
+    await api(`/api/v1/repos/${data.owner}/credential`, {method: 'DELETE'});
   }
   if (action === 'remove-repo' && await confirmAction('Remove repository', `Remove ${data.repo} from allowed repos?`)) {
     const [owner, name] = data.repo.split('/');

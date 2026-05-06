@@ -74,6 +74,68 @@ func TestRepoCredentialEndpointsDoNotRevealToken(t *testing.T) {
 	}
 }
 
+func TestOwnerCredentialCoversAllowedRepos(t *testing.T) {
+	srv, handler, _ := newRepoCredentialTestServer(t)
+	token := "github_pat_example_owner_token"
+	res := doJSON(handler, http.MethodPut, "/api/v1/repos/example/credential", `{"token":"`+token+`"}`, "admin-token")
+	if res.Code != http.StatusOK {
+		t.Fatalf("PUT owner credential: expected %d, got %d body=%s", http.StatusOK, res.Code, res.Body.String())
+	}
+	res = doJSON(handler, http.MethodGet, "/api/v1/repos", "", "admin-token")
+	if res.Code != http.StatusOK {
+		t.Fatalf("GET repos: expected %d, got %d body=%s", http.StatusOK, res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), `"credential_scope":"owner:example"`) {
+		t.Fatalf("expected owner credential scope, got %s", res.Body.String())
+	}
+	if strings.Contains(res.Body.String(), token) || strings.Contains(res.Body.String(), "github_pat_") {
+		t.Fatalf("repo listing leaked credential: %s", res.Body.String())
+	}
+	got, err := srv.resolveRepoToken(context.Background(), "example/private")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != token {
+		t.Fatalf("resolveRepoToken = %q, want %q", got, token)
+	}
+}
+
+func TestRepoCredentialOverridesOwnerCredential(t *testing.T) {
+	srv, _, st := newRepoCredentialTestServer(t)
+	ctx := context.Background()
+	ownerToken := "github_pat_example_owner_token"
+	repoToken := "github_pat_example_repo_token"
+	ownerNonce, ownerCiphertext, err := srv.vault.Encrypt(ownerToken, repoCredentialAAD("example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetRepoCredential(ctx, store.RepoCredential{RepoFullName: "example", Nonce: ownerNonce, Ciphertext: ownerCiphertext}); err != nil {
+		t.Fatal(err)
+	}
+	repoNonce, repoCiphertext, err := srv.vault.Encrypt(repoToken, repoCredentialAAD("example/private"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetRepoCredential(ctx, store.RepoCredential{RepoFullName: "example/private", Nonce: repoNonce, Ciphertext: repoCiphertext}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := srv.resolveRepoToken(ctx, "example/private")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != repoToken {
+		t.Fatalf("resolveRepoToken = %q, want repo override %q", got, repoToken)
+	}
+}
+
+func TestOwnerCredentialRequiresAllowedOwner(t *testing.T) {
+	_, handler, _ := newRepoCredentialTestServer(t)
+	res := doJSON(handler, http.MethodPut, "/api/v1/repos/other/credential", `{"token":"github_pat_example_owner_token"}`, "admin-token")
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("PUT disallowed owner credential: expected %d, got %d body=%s", http.StatusForbidden, res.Code, res.Body.String())
+	}
+}
+
 func TestTaskPayloadDoesNotPersistRepoCredential(t *testing.T) {
 	srv, _, st := newRepoCredentialTestServer(t)
 	ctx := context.Background()

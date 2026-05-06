@@ -35,4 +35,6 @@ The session key is optional; when unset, the console derives a signing key from 
 
 Allowed repositories can be added or removed from the Repositories panel. Repositories configured in the control plane's `FORGE_ALLOWED_REPOS` remain read-only in the UI; repositories added from the UI are stored in the control-plane database.
 
+Private repositories are supported. Store a repo-level credential for one `owner/repo`, or an owner-level credential for `owner` to cover every allowed repo under that owner. Repo-level credentials override owner-level credentials.
+
 The app intentionally has no third-party Python dependencies.
