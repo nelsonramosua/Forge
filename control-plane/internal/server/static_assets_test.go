@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,7 +12,7 @@ func TestLandingStaticAssetsAreServed(t *testing.T) {
 	_, handler, _ := newRepoCredentialTestServer(t)
 
 	for _, path := range []string{"/site.webmanifest", "/forgeLogos/favicon.svg"} {
-		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil)
 		res := httptest.NewRecorder()
 		handler.ServeHTTP(res, req)
 		if res.Code != http.StatusOK {
@@ -19,7 +20,7 @@ func TestLandingStaticAssetsAreServed(t *testing.T) {
 		}
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/site.webmanifest", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/site.webmanifest", nil)
 	res := httptest.NewRecorder()
 	handler.ServeHTTP(res, req)
 	if !strings.Contains(res.Body.String(), `"name": "Forge"`) {
